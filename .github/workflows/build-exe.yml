@@ -1,0 +1,64 @@
+name: Build HSE Management System EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows EXE
+    runs-on: windows-latest
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build EXE
+        run: pyinstaller --clean --noconfirm HSE-Management-System.spec
+
+      - name: Check EXE
+        shell: powershell
+        run: |
+          if (!(Test-Path "dist\HSE-Management-System.exe")) {
+            Write-Error "EXE was not created."
+            exit 1
+          }
+
+          Write-Host "EXE successfully created."
+          Get-Item "dist\HSE-Management-System.exe"
+
+      - name: Create release package
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path output
+          Copy-Item "dist\HSE-Management-System.exe" "output\HSE-Management-System.exe"
+          Compress-Archive `
+            -Path "output\HSE-Management-System.exe" `
+            -DestinationPath "HSE-Management-System-Windows.zip" `
+            -Force
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HSE-Management-System-Windows
+          path: |
+            dist/HSE-Management-System.exe
+            HSE-Management-System-Windows.zip
+          retention-days: 30
