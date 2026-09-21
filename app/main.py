@@ -5,18 +5,19 @@ import shutil
 import sqlite3
 import zipfile
 import logging
+import json
 from datetime import datetime, date
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QPixmap
+from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QRectF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLineEdit, QTextEdit, QPushButton, QLabel,
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox,
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
-    QHeaderView, QAbstractItemView, QCheckBox
+    QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QSizePolicy
 )
 
 from reportlab.lib import colors
@@ -29,7 +30,7 @@ from openpyxl import Workbook
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -248,6 +249,11 @@ class Database:
         );
         """)
 
+        # Backward-compatible additions for existing installations.
+        existing = {r["name"] for r in self.conn.execute("PRAGMA table_info(incidents)").fetchall()}
+        if "investigation_details" not in existing:
+            self.conn.execute("ALTER TABLE incidents ADD COLUMN investigation_details TEXT")
+
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -410,6 +416,93 @@ CAPA_SOURCES = [
 ]
 
 
+ISO_45001_CLAUSES = {
+    "4 - Context of the organization": [
+        ("4.1", "Understanding the organization and its context"),
+        ("4.2", "Understanding the needs and expectations of workers and other interested parties"),
+        ("4.3", "Determining the scope of the OH&S management system"),
+        ("4.4", "OH&S management system"),
+    ],
+    "5 - Leadership and worker participation": [
+        ("5.1", "Leadership and commitment"),
+        ("5.2", "OH&S policy"),
+        ("5.3", "Organizational roles, responsibilities and authorities"),
+        ("5.4", "Consultation and participation of workers"),
+    ],
+    "6 - Planning": [
+        ("6.1.1", "General"),
+        ("6.1.2", "Hazard identification and assessment of risks and opportunities"),
+        ("6.1.3", "Determination of legal requirements and other requirements"),
+        ("6.1.4", "Planning action"),
+        ("6.2.1", "OH&S objectives"),
+        ("6.2.2", "Planning to achieve OH&S objectives"),
+    ],
+    "7 - Support": [
+        ("7.1", "Resources"), ("7.2", "Competence"), ("7.3", "Awareness"),
+        ("7.4.1", "Communication - General"), ("7.4.2", "Internal communication"),
+        ("7.4.3", "External communication"), ("7.5.1", "Documented information - General"),
+        ("7.5.2", "Creating and updating"), ("7.5.3", "Control of documented information"),
+    ],
+    "8 - Operation": [
+        ("8.1.1", "General"), ("8.1.2", "Eliminating hazards and reducing OH&S risks"),
+        ("8.1.3", "Management of change"), ("8.1.4.1", "Procurement - General"),
+        ("8.1.4.2", "Contractors"), ("8.1.4.3", "Outsourcing"),
+        ("8.2", "Emergency preparedness and response"),
+    ],
+    "9 - Performance evaluation": [
+        ("9.1.1", "Monitoring, measurement, analysis and evaluation - General"),
+        ("9.1.2", "Evaluation of compliance"), ("9.2.1", "Internal audit - General"),
+        ("9.2.2", "Internal audit programme"), ("9.3", "Management review"),
+    ],
+    "10 - Improvement": [
+        ("10.1", "General"), ("10.2", "Incident, nonconformity and corrective action"),
+        ("10.3", "Continual improvement"),
+    ],
+}
+
+ISO_14001_CLAUSES = {
+    "4 - Context of the organization": [
+        ("4.1", "Understanding the organization and its context"),
+        ("4.2", "Understanding the needs and expectations of interested parties"),
+        ("4.3", "Determining the scope of the environmental management system"),
+        ("4.4", "Environmental management system"),
+    ],
+    "5 - Leadership": [
+        ("5.1", "Leadership and commitment"), ("5.2", "Environmental policy"),
+        ("5.3", "Organizational roles, responsibilities and authorities"),
+    ],
+    "6 - Planning": [
+        ("6.1.1", "General"), ("6.1.2", "Environmental aspects"),
+        ("6.1.3", "Compliance obligations"), ("6.1.4", "Planning action"),
+        ("6.2.1", "Environmental objectives"), ("6.2.2", "Planning actions to achieve environmental objectives"),
+    ],
+    "7 - Support": [
+        ("7.1", "Resources"), ("7.2", "Competence"), ("7.3", "Awareness"),
+        ("7.4.1", "Communication - General"), ("7.4.2", "Internal communication"),
+        ("7.4.3", "External communication"), ("7.5.1", "Documented information - General"),
+        ("7.5.2", "Creating and updating"), ("7.5.3", "Control of documented information"),
+    ],
+    "8 - Operation": [
+        ("8.1", "Operational planning and control"), ("8.2", "Emergency preparedness and response"),
+    ],
+    "9 - Performance evaluation": [
+        ("9.1.1", "Monitoring, measurement, analysis and evaluation - General"),
+        ("9.1.2", "Evaluation of compliance"), ("9.2.1", "Internal audit - General"),
+        ("9.2.2", "Internal audit programme"), ("9.3", "Management review"),
+    ],
+    "10 - Improvement": [
+        ("10.1", "General"), ("10.2", "Nonconformity and corrective action"),
+        ("10.3", "Continual improvement"),
+    ],
+}
+
+AUDIT_FINDING_TYPES = [
+    "Positive Observation", "Good Practice", "Conformity",
+    "Opportunity for Improvement", "Observation", "Minor Nonconformity",
+    "Major Nonconformity", "Environmental Finding", "Legal / Compliance Finding", "Other"
+]
+
+
 def next_number(prefix, table):
     year = datetime.now().year
     row = db.fetchone(
@@ -452,6 +545,81 @@ def overdue(target, status):
     except Exception:
         return False
 
+
+# ============================================================
+# SIMPLE BUILT-IN CHART WIDGETS
+# ============================================================
+
+class PieChartWidget(QWidget):
+    def __init__(self, values, title="Observation Distribution", parent=None):
+        super().__init__(parent)
+        self.values = values
+        self.title = title
+        self.setMinimumHeight(300)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QBrush(Qt.GlobalColor.white))
+        painter.setPen(QPen(Qt.GlobalColor.black))
+        painter.setFont(QFont("Arial", 12, QFont.Bold))
+        painter.drawText(15, 25, self.title)
+        total = sum(max(0, v) for v in self.values.values())
+        if total <= 0:
+            painter.setFont(QFont("Arial", 10))
+            painter.drawText(15, 60, "No observation data available")
+            painter.end(); return
+        rect = QRectF(30, 55, min(self.width()*0.55, 280), min(self.height()-85, 220))
+        start = 0.0
+        palette = [
+            Qt.GlobalColor.darkBlue, Qt.GlobalColor.darkGreen, Qt.GlobalColor.darkRed,
+            Qt.GlobalColor.darkCyan, Qt.GlobalColor.darkMagenta, Qt.GlobalColor.darkYellow,
+            Qt.GlobalColor.gray
+        ]
+        for i,(label,value) in enumerate(self.values.items()):
+            span = 360.0 * value / total
+            painter.setBrush(QBrush(palette[i % len(palette)]))
+            painter.drawPie(rect, int(start*16), int(span*16))
+            start += span
+        x = int(rect.right()+25); y = 70
+        painter.setFont(QFont("Arial", 9))
+        for i,(label,value) in enumerate(self.values.items()):
+            painter.setBrush(QBrush(palette[i % len(palette)])); painter.drawRect(x, y-10, 12, 12)
+            painter.setPen(QPen(Qt.GlobalColor.black)); painter.drawText(x+18, y, f"{label}: {value}")
+            y += 24
+        painter.end()
+
+class BarChartWidget(QWidget):
+    def __init__(self, values, title="Observations by Category", parent=None):
+        super().__init__(parent)
+        self.values = values
+        self.title = title
+        self.setMinimumHeight(320)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QBrush(Qt.GlobalColor.white))
+        painter.setPen(QPen(Qt.GlobalColor.black)); painter.setFont(QFont("Arial", 12, QFont.Bold))
+        painter.drawText(15, 25, self.title)
+        items = list(self.values.items())
+        if not items:
+            painter.setFont(QFont("Arial", 10)); painter.drawText(15, 60, "No observation data available"); painter.end(); return
+        max_value = max([v for _,v in items] or [1])
+        left, top, bottom = 45, 55, self.height()-45
+        width = max(1, self.width()-left-20); height = max(1, bottom-top)
+        bar_w = max(12, width / max(1,len(items)) - 8)
+        painter.setFont(QFont("Arial", 8))
+        for i,(label,value) in enumerate(items):
+            x = left + i*(width/len(items)) + 4
+            h = (value/max_value)*(height-35)
+            y = bottom-h
+            painter.setBrush(QBrush(Qt.GlobalColor.darkBlue)); painter.drawRect(QRectF(x,y,bar_w,h))
+            painter.setPen(QPen(Qt.GlobalColor.black)); painter.drawText(int(x), int(y-5), str(value))
+            painter.save(); painter.translate(x+bar_w/2, bottom+8); painter.rotate(-45); painter.drawText(0,0,label[:18]); painter.restore()
+        painter.end()
 
 # ============================================================
 # MAIN WINDOW
@@ -620,95 +788,37 @@ class MainWindow(QMainWindow):
         w, layout = self.page("HSE Dashboard")
 
         cards = QHBoxLayout()
-
         values = [
             ("Observations", "SELECT COUNT(*) c FROM observations"),
-            ("Open Observations",
-             "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
-            ("Overdue",
-             "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date < date('now')"),
-            ("Incidents",
-             "SELECT COUNT(*) c FROM incidents"),
-            ("Audits",
-             "SELECT COUNT(*) c FROM audits"),
-            ("CAPA",
-             "SELECT COUNT(*) c FROM capa"),
+            ("Open Observations", "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled')"),
+            ("Overdue", "SELECT COUNT(*) c FROM observations WHERE status NOT IN ('Closed','Cancelled') AND target_date < date('now')"),
+            ("Incidents", "SELECT COUNT(*) c FROM incidents"),
+            ("Audits", "SELECT COUNT(*) c FROM audits"),
+            ("CAPA", "SELECT COUNT(*) c FROM capa"),
         ]
-
         for name, sql in values:
-
-            row = db.fetchone(sql)
-            value = row["c"]
-
-            box = QGroupBox(name)
-            box_layout = QVBoxLayout(box)
-
-            label = QLabel(str(value))
-            label.setStyleSheet("""
-                font-size: 30px;
-                font-weight: bold;
-                color: #17365D;
-            """)
-
-            box_layout.addWidget(label)
-
-            cards.addWidget(box)
-
+            value=db.fetchone(sql)["c"]
+            box=QGroupBox(name); bl=QVBoxLayout(box)
+            label=QLabel(str(value)); label.setStyleSheet("font-size: 28px; font-weight: bold; color:#17365D;")
+            bl.addWidget(label); cards.addWidget(box)
         layout.addLayout(cards)
 
-        layout.addWidget(
-            QLabel(
-                f"Company: {db.setting('company_name', '')}    "
-                f"Project: {db.setting('project_name', '')}"
-            )
-        )
+        charts=QHBoxLayout()
+        obs_types={r["obs_type"] or "Other": r["c"] for r in db.fetchall("SELECT obs_type,COUNT(*) c FROM observations GROUP BY obs_type")}
+        cats={r["category"] or "Other": r["c"] for r in db.fetchall("SELECT category,COUNT(*) c FROM observations GROUP BY category ORDER BY c DESC LIMIT 12")}
+        charts.addWidget(PieChartWidget(obs_types),1)
+        charts.addWidget(BarChartWidget(cats),1)
+        layout.addLayout(charts,1)
 
-        table = QTableWidget()
-        table.setColumnCount(4)
-        table.setHorizontalHeaderLabels(
-            ["Observation", "Type", "Priority", "Status"]
-        )
-        table.horizontalHeader().setSectionResizeMode(
-            QHeaderView.Stretch
-        )
+        layout.addWidget(QLabel(f"Company: {db.setting('company_name','')}    Project: {db.setting('project_name','')}"))
 
-        rows = db.fetchall("""
-            SELECT number, obs_type, priority, status
-            FROM observations
-            ORDER BY id DESC
-            LIMIT 10
-        """)
-
+        table=QTableWidget(); table.setColumnCount(4); table.setHorizontalHeaderLabels(["Observation","Type","Priority","Status"])
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        rows=db.fetchall("SELECT number,obs_type,priority,status FROM observations ORDER BY id DESC LIMIT 10")
         table.setRowCount(len(rows))
-
-        for r, row in enumerate(rows):
-
-            table.setItem(
-                r, 0,
-                QTableWidgetItem(safe(row["number"]))
-            )
-            table.setItem(
-                r, 1,
-                QTableWidgetItem(safe(row["obs_type"]))
-            )
-            table.setItem(
-                r, 2,
-                QTableWidgetItem(safe(row["priority"]))
-            )
-            table.setItem(
-                r, 3,
-                QTableWidgetItem(safe(row["status"]))
-            )
-
-        layout.addWidget(
-            QLabel("Recent Observations")
-        )
-
-        layout.addWidget(table)
-
-    # ========================================================
-    # OBSERVATIONS
-    # ========================================================
+        for r,row in enumerate(rows):
+            for c,key in enumerate(["number","obs_type","priority","status"]): table.setItem(r,c,QTableWidgetItem(safe(row[key])))
+        layout.addWidget(QLabel("Recent Observations")); layout.addWidget(table)
 
     def observations(self):
 
@@ -844,248 +954,48 @@ class MainWindow(QMainWindow):
 
     def observation_form(self, refresh):
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(
-            "New HSE Observation"
-        )
-        dialog.resize(800, 750)
-
-        scroll = QWidget()
-        form = QFormLayout(scroll)
-
-        edits = {}
-
-        def edit(name):
-            e = QLineEdit()
-            edits[name] = e
-            form.addRow(
-                name.replace("_", " ").title() + ":",
-                e
-            )
-            return e
-
-        edit("project")
-        edit("company")
-        edit("location")
-        edit("area")
-        edit("responsible")
-        edit("designation")
-        edit("employee_id")
-        edit("observer")
-        edit("observer_designation")
-        edit("observer_id")
-        edit("observer_company")
-
-        obs_type = QComboBox()
-        obs_type.addItems(OBS_TYPES)
-        form.addRow("Observation Type:", obs_type)
-
-        category = QComboBox()
-        category.addItems(CATEGORIES)
-        form.addRow("Category:", category)
-
-        edit("subcategory")
-
-        observation = QTextEdit()
-        form.addRow(
-            "Observation Description:",
-            observation
-        )
-
-        immediate = QTextEdit()
-        form.addRow(
-            "Immediate Action:",
-            immediate
-        )
-
-        corrective = QTextEdit()
-        form.addRow(
-            "Corrective Action:",
-            corrective
-        )
-
-        preventive = QTextEdit()
-        form.addRow(
-            "Preventive Action:",
-            preventive
-        )
-
-        priority = QComboBox()
-        priority.addItems(PRIORITIES)
-        form.addRow("Priority:", priority)
-
-        target = QDateEdit()
-        target.setCalendarPopup(True)
-        target.setDate(
-            datetime.now().date()
-        )
-        form.addRow(
-            "Target Completion Date:",
-            target
-        )
-
-        status = QComboBox()
-        status.addItems(STATUSES)
-        form.addRow("Status:", status)
-
-        photo_path = {"value": ""}
-
-        photo_button = QPushButton(
-            "Attach Evidence Photo"
-        )
-
-        def choose_photo():
-
-            path, _ = QFileDialog.getOpenFileName(
-                dialog,
-                "Select Photo",
-                "",
-                "Images (*.png *.jpg *.jpeg *.bmp)"
-            )
-
-            if path:
-                photo_path["value"] = path
-                photo_button.setText(
-                    Path(path).name
-                )
-
-        photo_button.clicked.connect(
-            choose_photo
-        )
-
-        form.addRow(
-            "Evidence:",
-            photo_button
-        )
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save |
-            QDialogButtonBox.Cancel
-        )
-
-        form.addRow(buttons)
-
-        buttons.rejected.connect(
-            dialog.reject
-        )
-
+        dialog=QDialog(self); dialog.setWindowTitle("New HSE Observation"); dialog.resize(900,780); dialog.setMinimumSize(700,550)
+        outer=QVBoxLayout(dialog)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); scroll.setWidget(content); outer.addWidget(scroll)
+        edits={}
+        def add_edit(name):
+            e=QLineEdit(); edits[name]=e; form.addRow(name.replace("_"," ").title()+":",e); return e
+        for name in ["project","company","location","area","responsible","designation","employee_id","observer","observer_designation","observer_id","observer_company"]: add_edit(name)
+        obs_type=QComboBox(); obs_type.addItems(OBS_TYPES); form.addRow("Observation Type:",obs_type)
+        category=QComboBox(); category.setEditable(True); category.addItems(CATEGORIES); form.addRow("Category:",category)
+        subcat=add_edit("subcategory")
+        observation=QTextEdit(); observation.setMinimumHeight(90); form.addRow("Observation Description:",observation)
+        immediate=QTextEdit(); immediate.setMinimumHeight(70); form.addRow("Immediate Action:",immediate)
+        corrective=QTextEdit(); corrective.setMinimumHeight(70); form.addRow("Corrective Action:",corrective)
+        preventive=QTextEdit(); preventive.setMinimumHeight(70); form.addRow("Preventive Action:",preventive)
+        priority=QComboBox(); priority.addItems(PRIORITIES); form.addRow("Priority:",priority)
+        target=QDateEdit(); target.setCalendarPopup(True); target.setDate(datetime.now().date()); form.addRow("Target Completion Date:",target)
+        status=QComboBox(); status.addItems(STATUSES); form.addRow("Status:",status)
+        closeout=QTextEdit(); closeout.setMinimumHeight(60); form.addRow("Closeout Comments:",closeout)
+        evidence={"Observation Evidence":"","Closeout Evidence":""}
+        def attach(kind,button):
+            path,_=QFileDialog.getOpenFileName(dialog,"Select Evidence Photo","","Images (*.png *.jpg *.jpeg *.bmp *.webp)")
+            if path: evidence[kind]=path; button.setText(Path(path).name)
+        for kind in evidence:
+            b=QPushButton(f"Attach {kind}"); b.clicked.connect(lambda checked=False,k=kind,btn=b:attach(k,btn)); form.addRow(kind+":",b)
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); outer.addWidget(buttons); buttons.rejected.connect(dialog.reject)
         def save():
-
-            if not edits["location"].text().strip():
-                QMessageBox.warning(
-                    dialog,
-                    "Required",
-                    "Location is required."
-                )
-                return
-
-            if not observation.toPlainText().strip():
-                QMessageBox.warning(
-                    dialog,
-                    "Required",
-                    "Observation description is required."
-                )
-                return
-
-            number = next_number(
-                "HSE-OBS",
-                "observations"
-            )
-
-            db.execute("""
-                INSERT INTO observations (
-                    number, obs_date, obs_time,
-                    project, company, location, area,
-                    responsible, designation, employee_id,
-                    observer, observer_designation,
-                    observer_id, observer_company,
-                    obs_type, category, subcategory,
-                    observation, immediate_action,
-                    corrective_action, preventive_action,
-                    priority, target_date, status,
-                    created_at
-                )
-                VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?
-                )
-            """, (
-                number,
-                today(),
-                now_time(),
-                edits["project"].text(),
-                edits["company"].text(),
-                edits["location"].text(),
-                edits["area"].text(),
-                edits["responsible"].text(),
-                edits["designation"].text(),
-                edits["employee_id"].text(),
-                edits["observer"].text(),
-                edits["observer_designation"].text(),
-                edits["observer_id"].text(),
-                edits["observer_company"].text(),
-                obs_type.currentText(),
-                category.currentText(),
-                edits["subcategory"].text(),
-                observation.toPlainText(),
-                immediate.toPlainText(),
-                corrective.toPlainText(),
-                preventive.toPlainText(),
-                priority.currentText(),
-                target.date().toString("yyyy-MM-dd"),
-                status.currentText(),
-                datetime.now().isoformat()
-            ))
-
-            row = db.fetchone(
-                "SELECT id FROM observations WHERE number=?",
-                (number,)
-            )
-
-            if photo_path["value"] and row:
-
-                source = Path(
-                    photo_path["value"]
-                )
-
-                destination = (
-                    ATTACH_DIR /
-                    f"{number}_{source.name}"
-                )
-
-                shutil.copy2(
-                    source,
-                    destination
-                )
-
-                db.execute("""
-                    INSERT INTO observation_attachments
-                    (observation_id,file_path,attachment_type)
-                    VALUES(?,?,?)
-                """, (
-                    row["id"],
-                    str(destination),
-                    "Evidence"
-                ))
-
-            dialog.accept()
-            refresh()
-
-        buttons.accepted.connect(save)
-
-        scroll_area = QWidget()
-        scroll_layout = QVBoxLayout(scroll_area)
-        scroll_layout.addWidget(scroll)
-
-        outer = QVBoxLayout(dialog)
-        outer.addWidget(scroll_area)
-
-        dialog.exec()
-
-    # ========================================================
-    # INCIDENTS
-    # ========================================================
+            if not edits["location"].text().strip() or not observation.toPlainText().strip():
+                QMessageBox.warning(dialog,"Required","Location and Observation Description are required."); return
+            try:
+                number=next_number("HSE-OBS","observations")
+                db.execute("""INSERT INTO observations(number,obs_date,obs_time,project,company,location,area,responsible,designation,employee_id,observer,observer_designation,observer_id,observer_company,obs_type,category,subcategory,observation,immediate_action,corrective_action,preventive_action,priority,target_date,status,closeout_comments,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+                    number,today(),now_time(),edits["project"].text(),edits["company"].text(),edits["location"].text(),edits["area"].text(),edits["responsible"].text(),edits["designation"].text(),edits["employee_id"].text(),edits["observer"].text(),edits["observer_designation"].text(),edits["observer_id"].text(),edits["observer_company"].text(),obs_type.currentText(),category.currentText(),subcat.text(),observation.toPlainText(),immediate.toPlainText(),corrective.toPlainText(),preventive.toPlainText(),priority.currentText(),target.date().toString("yyyy-MM-dd"),status.currentText(),closeout.toPlainText(),datetime.now().isoformat()))
+                row=db.fetchone("SELECT id FROM observations WHERE number=?",(number,))
+                if row:
+                    for kind,path in evidence.items():
+                        if path:
+                            source=Path(path); dest=ATTACH_DIR/f"{number}_{kind.replace(' ','_')}_{source.name}"; shutil.copy2(source,dest)
+                            db.execute("INSERT INTO observation_attachments(observation_id,file_path,attachment_type) VALUES(?,?,?)",(row["id"],str(dest),kind))
+                dialog.accept(); refresh(); self.dashboard()
+            except Exception as e:
+                logging.exception("Observation save failed"); QMessageBox.critical(dialog,"Save Error",str(e))
+        buttons.accepted.connect(save); dialog.exec()
 
     def incidents(self):
 
@@ -1162,222 +1072,81 @@ class MainWindow(QMainWindow):
 
     def incident_form(self, refresh):
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(
-            "New Incident Investigation"
-        )
-        dialog.resize(800, 750)
-
-        form = QFormLayout(dialog)
-        edits = {}
-
-        def add_edit(name):
-
-            e = QLineEdit()
-            edits[name] = e
-
-            form.addRow(
-                name.replace("_", " ").title(),
-                e
-            )
-
-        for name in [
-            "incident_time",
-            "location",
-            "project",
-            "company",
-            "department",
-            "activity",
-            "person_involved",
-            "employee_id",
-            "designation",
-            "supervisor",
-            "witnesses",
-            "equipment"
-        ]:
-            add_edit(name)
-
-        incident_type = QComboBox()
-        incident_type.addItems(
-            INCIDENT_TYPES
-        )
-
-        form.addRow(
-            "Incident Type",
-            incident_type
-        )
-
-        description = QTextEdit()
-        form.addRow(
-            "Incident Description",
-            description
-        )
-
-        immediate = QTextEdit()
-        form.addRow(
-            "Immediate Action",
-            immediate
-        )
-
-        consequences = QTextEdit()
-        form.addRow(
-            "Actual Consequences",
-            consequences
-        )
-
-        potential = QTextEdit()
-        form.addRow(
-            "Potential Consequences",
-            potential
-        )
-
-        method = QComboBox()
-        method.addItems(
-            INVESTIGATION_METHODS
-        )
-
-        form.addRow(
-            "Investigation Method",
-            method
-        )
-
-        whys = []
-
-        for i in range(1, 6):
-
-            e = QLineEdit()
-
-            whys.append(e)
-
-            form.addRow(
-                f"Why {i}",
-                e
-            )
-
-        direct = QTextEdit()
-        form.addRow(
-            "Direct Cause",
-            direct
-        )
-
-        contributing = QTextEdit()
-        form.addRow(
-            "Contributing Factors",
-            contributing
-        )
-
-        root = QTextEdit()
-        form.addRow(
-            "Root Cause",
-            root
-        )
-
-        corrective = QTextEdit()
-        form.addRow(
-            "Corrective Action",
-            corrective
-        )
-
-        preventive = QTextEdit()
-        form.addRow(
-            "Preventive Action",
-            preventive
-        )
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save |
-            QDialogButtonBox.Cancel
-        )
-
-        form.addRow(buttons)
-
-        buttons.rejected.connect(
-            dialog.reject
-        )
-
+        dialog=QDialog(self); dialog.setWindowTitle("New Incident Investigation"); dialog.resize(1000,800); dialog.setMinimumSize(760,600)
+        outer=QVBoxLayout(dialog); scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); main=QVBoxLayout(content); scroll.setWidget(content); outer.addWidget(scroll)
+        common=QGroupBox("Incident Information"); cf=QFormLayout(common); edits={}
+        def efield(name):
+            e=QLineEdit(); edits[name]=e; cf.addRow(name.replace("_"," ").title()+":",e)
+        for name in ["incident_time","location","project","company","department","activity","person_involved","employee_id","designation","supervisor","witnesses","equipment"]: efield(name)
+        incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); cf.addRow("Incident Type:",incident_type)
+        description=QTextEdit(); description.setMinimumHeight(100); cf.addRow("Detailed Incident Description:",description)
+        immediate=QTextEdit(); cf.addRow("Immediate Actions Taken:",immediate)
+        consequences=QTextEdit(); cf.addRow("Actual Consequences:",consequences)
+        potential=QTextEdit(); cf.addRow("Potential Consequences:",potential)
+        status=QComboBox(); status.addItems(STATUSES); cf.addRow("Status:",status)
+        main.addWidget(common)
+        method=QComboBox(); method.addItems(INVESTIGATION_METHODS); main.addWidget(QLabel("Investigation Method")); main.addWidget(method)
+        pages=QStackedWidget(); main.addWidget(pages)
+        details={}
+        def text_page(title, fields):
+            box=QWidget(); fl=QFormLayout(box); widgets={}
+            for label,key in fields:
+                w=QTextEdit(); w.setMinimumHeight(65); widgets[key]=w; fl.addRow(label,w)
+            pages.addWidget(box); details[title]=widgets; return widgets
+        root=text_page("Root Cause Analysis",[("Problem Statement","problem"),("Immediate / Direct Cause","direct"),("Contributing Causes","contributing"),("Underlying / System Causes","underlying"),("Failed or Missing Controls","controls"),("Human / Organizational Factors","factors"),("Root Cause","root"),("Corrective Action","corrective"),("Preventive Action","preventive"),("Lessons Learned","lessons")])
+        whybox=QWidget(); wl=QVBoxLayout(whybox); why_rows=[]
+        problem=QTextEdit(); problem.setPlaceholderText("Incident / problem statement"); wl.addWidget(QLabel("Problem / Incident Statement")); wl.addWidget(problem)
+        why_container=QVBoxLayout(); wl.addLayout(why_container)
+        def add_why():
+            n=len(why_rows)+1; row=QHBoxLayout(); q=QLineEdit(); a=QTextEdit(); a.setFixedHeight(50); row.addWidget(QLabel(f"Why {n}")); row.addWidget(q); row.addWidget(QLabel("Answer")); row.addWidget(a); why_container.addLayout(row); why_rows.append((q,a))
+        for _ in range(5): add_why()
+        addwhy=QPushButton("+ Add Why"); addwhy.clicked.connect(add_why); wl.addWidget(addwhy)
+        for label,key in [("Root Cause","root"),("Corrective Action","corrective"),("Preventive Action","preventive"),("Lessons Learned","lessons")]:
+            w=QTextEdit(); w.setMinimumHeight(60); why_container.addWidget(QLabel(label)); why_container.addWidget(w); why_rows.append((None,w)) if False else None
+            details.setdefault("5 Why Fields",{})[key]=w
+        pages.addWidget(whybox)
+        fish=QWidget(); fl=QFormLayout(fish); fish_widgets={}
+        for cat in ["People","Process","Equipment / Machinery","Materials","Environment","Management / Policy","Training","Supervision","Communication"]:
+            w=QTextEdit(); w.setMinimumHeight(55); fish_widgets[cat]=w; fl.addRow(cat,w)
+        for label,key in [("Root Cause","root"),("Contributing Causes","contributing"),("Corrective Action","corrective"),("Preventive Action","preventive")]:
+            w=QTextEdit(); w.setMinimumHeight(60); fish_widgets[key]=w; fl.addRow(label,w)
+        pages.addWidget(fish); details["Fishbone / Ishikawa"]=fish_widgets
+        icam=QWidget(); il=QVBoxLayout(icam)
+        timeline=QTableWidget(0,5); timeline.setHorizontalHeaderLabels(["Date","Time","Event","Evidence / Source","Person / Remarks"]); timeline.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch); il.addWidget(QLabel("Timeline")); il.addWidget(timeline)
+        tb=QPushButton("+ Add Timeline Event"); il.addWidget(tb)
+        def add_event():
+            r=timeline.rowCount(); timeline.insertRow(r)
+            for c in range(5): timeline.setItem(r,c,QTableWidgetItem(""))
+        tb.clicked.connect(add_event); add_event()
+        icam_fields={}
+        for label,key in [("Incident Sequence","sequence"),("Absent / Failed Defences","defences"),("Individual / Team Actions","actions"),("Task / Environmental Conditions","conditions"),("Organizational / Latent Conditions","organizational"),("Findings / Root Causes","findings"),("Corrective Actions","corrective"),("Preventive Actions","preventive"),("Lessons Learned","lessons")]:
+            w=QTextEdit(); w.setMinimumHeight(65); icam_fields[key]=w; il.addWidget(QLabel(label)); il.addWidget(w)
+        pages.addWidget(icam); details["ICAM"]=icam_fields
+        # generic pages for other existing methods
+        generic=text_page("Other",[("Analysis / Method Details","details"),("Root Cause / Findings","root"),("Corrective Action","corrective"),("Preventive Action","preventive")]); details["Other"]=generic
+        def select_page(i):
+            name=method.itemText(i)
+            mapping={"Root Cause Analysis":0,"5 Why Analysis":1,"Fishbone / Ishikawa":2,"ICAM":3}
+            pages.setCurrentIndex(mapping.get(name,4))
+        method.currentIndexChanged.connect(select_page); select_page(method.currentIndex())
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); outer.addWidget(buttons); buttons.rejected.connect(dialog.reject)
         def save():
-
-            if not edits["location"].text().strip():
-                QMessageBox.warning(
-                    dialog,
-                    "Required",
-                    "Location is required."
-                )
-                return
-
-            number = next_number(
-                "HSE-INC",
-                "incidents"
-            )
-
-            db.execute("""
-                INSERT INTO incidents (
-                    number, incident_date,
-                    incident_time, location,
-                    project, company, department,
-                    activity, incident_type,
-                    person_involved, employee_id,
-                    designation, supervisor,
-                    witnesses, description,
-                    immediate_action,
-                    consequences,
-                    potential_consequences,
-                    equipment,
-                    investigation_method,
-                    why1, why2, why3, why4, why5,
-                    direct_cause,
-                    contributing_factors,
-                    root_cause,
-                    corrective_action,
-                    preventive_action,
-                    created_at
-                )
-                VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?
-                )
-            """, (
-                number,
-                today(),
-                edits["incident_time"].text(),
-                edits["location"].text(),
-                edits["project"].text(),
-                edits["company"].text(),
-                edits["department"].text(),
-                edits["activity"].text(),
-                incident_type.currentText(),
-                edits["person_involved"].text(),
-                edits["employee_id"].text(),
-                edits["designation"].text(),
-                edits["supervisor"].text(),
-                edits["witnesses"].text(),
-                description.toPlainText(),
-                immediate.toPlainText(),
-                consequences.toPlainText(),
-                potential.toPlainText(),
-                edits["equipment"].text(),
-                method.currentText(),
-                *[x.text() for x in whys],
-                direct.toPlainText(),
-                contributing.toPlainText(),
-                root.toPlainText(),
-                corrective.toPlainText(),
-                preventive.toPlainText(),
-                datetime.now().isoformat()
-            ))
-
-            dialog.accept()
-            refresh()
-
-        buttons.accepted.connect(save)
-
-        dialog.exec()
-
-    # ========================================================
-    # AUDITS
-    # ========================================================
+            try:
+                number=next_number("HSE-INC","incidents"); method_name=method.currentText(); payload={}
+                if method_name=="Root Cause Analysis": payload={k:w.toPlainText() for k,w in root.items()}
+                elif method_name=="5 Why Analysis":
+                    payload={"problem":problem.toPlainText(),"whys":[{"why":q.text(),"answer":a.toPlainText()} for q,a in why_rows],**{k:w.toPlainText() for k,w in details.get("5 Why Fields",{}).items()}}
+                elif method_name=="Fishbone / Ishikawa": payload={k:w.toPlainText() for k,w in fish_widgets.items()}
+                elif method_name=="ICAM":
+                    events=[]
+                    for r in range(timeline.rowCount()): events.append([timeline.item(r,c).text() if timeline.item(r,c) else "" for c in range(5)])
+                    payload={"timeline":events,**{k:w.toPlainText() for k,w in icam_fields.items()}}
+                else: payload={k:w.toPlainText() for k,w in generic.items()}
+                db.execute("""INSERT INTO incidents(number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,investigation_details,status,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),edits["person_involved"].text(),edits["employee_id"].text(),edits["designation"].text(),edits["supervisor"].text(),edits["witnesses"].text(),description.toPlainText(),immediate.toPlainText(),consequences.toPlainText(),potential.toPlainText(),edits["equipment"].text(),method_name,json.dumps(payload,ensure_ascii=False),status.currentText(),datetime.now().isoformat()))
+                dialog.accept(); refresh(); self.dashboard()
+            except Exception as e:
+                logging.exception("Incident save failed"); QMessageBox.critical(dialog,"Save Error",str(e))
+        buttons.accepted.connect(save); dialog.exec()
 
     def audits(self):
 
@@ -1455,225 +1224,40 @@ class MainWindow(QMainWindow):
 
     def audit_form(self, refresh):
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(
-            "New Audit"
-        )
-        dialog.resize(750, 700)
-
-        form = QFormLayout(dialog)
-        edits = {}
-
-        def edit(name):
-
-            e = QLineEdit()
-            edits[name] = e
-
-            form.addRow(
-                name.replace("_", " ").title(),
-                e
-            )
-
-        standard = QComboBox()
-        standard.addItems([
-            "ISO 45001",
-            "ISO 14001"
-        ])
-
-        form.addRow(
-            "Standard",
-            standard
-        )
-
-        audit_type = QComboBox()
-        audit_type.addItems(
-            AUDIT_TYPES
-        )
-
-        form.addRow(
-            "Audit Type",
-            audit_type
-        )
-
-        for name in [
-            "project",
-            "location",
-            "department",
-            "auditor",
-            "lead_auditor",
-            "auditee",
-            "start_time",
-            "end_time"
-        ]:
-            edit(name)
-
-        scope = QTextEdit()
-        form.addRow(
-            "Scope",
-            scope
-        )
-
-        objective = QTextEdit()
-        form.addRow(
-            "Objective",
-            objective
-        )
-
-        criteria = QTextEdit()
-        form.addRow(
-            "Audit Criteria",
-            criteria
-        )
-
-        clause = QComboBox()
-
-        clause.addItems([
-            "4 - Context of organization",
-            "5 - Leadership",
-            "5 - Leadership and worker participation",
-            "6 - Planning",
-            "7 - Support",
-            "8 - Operation",
-            "9 - Performance evaluation",
-            "10 - Improvement"
-        ])
-
-        form.addRow(
-            "Clause",
-            clause
-        )
-
-        sub_clause = QLineEdit()
-
-        form.addRow(
-            "Sub-Clause",
-            sub_clause
-        )
-
-        requirement = QTextEdit()
-
-        form.addRow(
-            "Requirement / Criterion",
-            requirement
-        )
-
-        finding_type = QComboBox()
-
-        finding_type.addItems(
-            FINDING_TYPES
-        )
-
-        form.addRow(
-            "Finding Type",
-            finding_type
-        )
-
-        finding = QTextEdit()
-
-        form.addRow(
-            "Finding / Evidence",
-            finding
-        )
-
-        responsible = QLineEdit()
-
-        form.addRow(
-            "Responsible Person",
-            responsible
-        )
-
-        target = QLineEdit()
-
-        form.addRow(
-            "Target Date",
-            target
-        )
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save |
-            QDialogButtonBox.Cancel
-        )
-
-        form.addRow(buttons)
-
-        buttons.rejected.connect(
-            dialog.reject
-        )
-
+        dialog=QDialog(self); dialog.setWindowTitle("New Audit"); dialog.resize(900,800); dialog.setMinimumSize(720,600)
+        outer=QVBoxLayout(dialog); scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); scroll.setWidget(content); outer.addWidget(scroll)
+        edits={}
+        def edit(name,label=None):
+            w=QLineEdit(); edits[name]=w; form.addRow(label or name.replace("_"," ").title()+":",w); return w
+        standard=QComboBox(); standard.addItems(["ISO 45001:2018","ISO 14001:2015"]); form.addRow("Audit Standard:",standard)
+        audit_type=QComboBox(); audit_type.addItems(AUDIT_TYPES); form.addRow("Audit Type:",audit_type)
+        for name in ["project","location","department","auditor","lead_auditor","auditee","start_time","end_time"]: edit(name)
+        scope=QTextEdit(); form.addRow("Scope:",scope); objective=QTextEdit(); form.addRow("Objective:",objective); criteria=QTextEdit(); form.addRow("Audit Criteria:",criteria)
+        clause=QComboBox(); sub_clause=QComboBox(); clause_desc=QLabel(); sub_desc=QLabel(); form.addRow("Main Clause:",clause); form.addRow("Clause Description:",clause_desc); form.addRow("Sub-Clause:",sub_clause); form.addRow("Sub-Clause Description:",sub_desc)
+        def load_clauses():
+            data=ISO_45001_CLAUSES if standard.currentText().startswith("ISO 45001") else ISO_14001_CLAUSES
+            clause.blockSignals(True); clause.clear(); clause.addItems(list(data.keys())); clause.blockSignals(False); update_sub()
+        def update_sub():
+            data=ISO_45001_CLAUSES if standard.currentText().startswith("ISO 45001") else ISO_14001_CLAUSES; key=clause.currentText(); items=data.get(key,[]); sub_clause.clear(); sub_clause.addItems([f"{n} - {d}" for n,d in items]); clause_desc.setText(key.split(" - ",1)[1] if " - " in key else ""); update_sub_desc()
+        def update_sub_desc():
+            text=sub_clause.currentText(); sub_desc.setText(text.split(" - ",1)[1] if " - " in text else "")
+        standard.currentIndexChanged.connect(load_clauses); clause.currentIndexChanged.connect(update_sub); sub_clause.currentIndexChanged.connect(update_sub_desc); load_clauses()
+        requirement=QTextEdit(); form.addRow("Requirement / Reference:",requirement)
+        finding_type=QComboBox(); finding_type.addItems(AUDIT_FINDING_TYPES); form.addRow("Finding Type:",finding_type)
+        observation=QTextEdit(); form.addRow("Observation:",observation); evidence=QTextEdit(); form.addRow("Objective Evidence:",evidence); action=QTextEdit(); form.addRow("Corrective Action:",action)
+        responsible=QLineEdit(); form.addRow("Responsible Person:",responsible); target=QLineEdit(); form.addRow("Target Date:",target)
+        status=QComboBox(); status.addItems(STATUSES); form.addRow("Status:",status); closeout=QTextEdit(); form.addRow("Closeout Evidence / Verification:",closeout)
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); outer.addWidget(buttons); buttons.rejected.connect(dialog.reject)
         def save():
-
-            number = next_number(
-                "HSE-AUD",
-                "audits"
-            )
-
-            db.execute("""
-                INSERT INTO audits (
-                    number,audit_date,audit_type,
-                    standard,project,location,
-                    department,auditor,lead_auditor,
-                    auditee,scope,objective,
-                    criteria,start_time,end_time,
-                    created_at
-                )
-                VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?,?,?
-                )
-            """, (
-                number,
-                today(),
-                audit_type.currentText(),
-                standard.currentText(),
-                edits["project"].text(),
-                edits["location"].text(),
-                edits["department"].text(),
-                edits["auditor"].text(),
-                edits["lead_auditor"].text(),
-                edits["auditee"].text(),
-                scope.toPlainText(),
-                objective.toPlainText(),
-                criteria.toPlainText(),
-                edits["start_time"].text(),
-                edits["end_time"].text(),
-                datetime.now().isoformat()
-            ))
-
-            audit = db.fetchone(
-                "SELECT id FROM audits WHERE number=?",
-                (number,)
-            )
-
-            db.execute("""
-                INSERT INTO audit_findings (
-                    audit_id,clause,sub_clause,
-                    requirement,finding_type,
-                    observation,evidence,
-                    responsible,target_date
-                )
-                VALUES (?,?,?,?,?,?,?,?,?)
-            """, (
-                audit["id"],
-                clause.currentText(),
-                sub_clause.text(),
-                requirement.toPlainText(),
-                finding_type.currentText(),
-                finding.toPlainText(),
-                finding.toPlainText(),
-                responsible.text(),
-                target.text()
-            ))
-
-            dialog.accept()
-            refresh()
-
-        buttons.accepted.connect(save)
-
-        dialog.exec()
-
-    # ========================================================
-    # CAPA
-    # ========================================================
+            try:
+                number=next_number("HSE-AUD","audits")
+                db.execute("""INSERT INTO audits(number,audit_date,audit_type,standard,project,location,department,auditor,lead_auditor,auditee,scope,objective,criteria,start_time,end_time,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,today(),audit_type.currentText(),standard.currentText(),edits["project"].text(),edits["location"].text(),edits["department"].text(),edits["auditor"].text(),edits["lead_auditor"].text(),edits["auditee"].text(),scope.toPlainText(),objective.toPlainText(),criteria.toPlainText(),edits["start_time"].text(),edits["end_time"].text(),datetime.now().isoformat()))
+                audit=db.fetchone("SELECT id FROM audits WHERE number=?",(number,)); sc=sub_clause.currentText(); scnum=sc.split(" - ",1)[0] if " - " in sc else sc; main_clause=clause.currentText().split(" - ",1)[0]
+                db.execute("""INSERT INTO audit_findings(audit_id,clause,sub_clause,requirement,finding_type,observation,evidence,corrective_action,responsible,target_date,status,verification,closeout_evidence) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",(audit["id"],main_clause,scnum,requirement.toPlainText(),finding_type.currentText(),observation.toPlainText(),evidence.toPlainText(),action.toPlainText(),responsible.text(),target.text(),status.currentText(),closeout.toPlainText(),closeout.toPlainText()))
+                dialog.accept(); refresh()
+            except Exception as e:
+                logging.exception("Audit save failed"); QMessageBox.critical(dialog,"Save Error",str(e))
+        buttons.accepted.connect(save); dialog.exec()
 
     def capa(self):
 
@@ -1757,150 +1341,20 @@ class MainWindow(QMainWindow):
 
     def capa_form(self, refresh):
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle(
-            "New CAPA"
-        )
-        dialog.resize(750, 650)
-
-        form = QFormLayout(dialog)
-
-        source = QComboBox()
-        source.addItems(CAPA_SOURCES)
-        form.addRow(
-            "Source",
-            source
-        )
-
-        reference = QLineEdit()
-        form.addRow(
-            "Reference Number",
-            reference
-        )
-
-        finding = QTextEdit()
-        form.addRow(
-            "Finding",
-            finding
-        )
-
-        root = QTextEdit()
-        form.addRow(
-            "Root Cause",
-            root
-        )
-
-        corrective = QTextEdit()
-        form.addRow(
-            "Corrective Action",
-            corrective
-        )
-
-        preventive = QTextEdit()
-        form.addRow(
-            "Preventive Action",
-            preventive
-        )
-
-        responsible = QLineEdit()
-        form.addRow(
-            "Responsible Person",
-            responsible
-        )
-
-        priority = QComboBox()
-        priority.addItems(PRIORITIES)
-        form.addRow(
-            "Priority",
-            priority
-        )
-
-        target = QLineEdit()
-        form.addRow(
-            "Target Date",
-            target
-        )
-
-        status = QComboBox()
-        status.addItems(STATUSES)
-        form.addRow(
-            "Status",
-            status
-        )
-
-        verification = QTextEdit()
-        form.addRow(
-            "Verification",
-            verification
-        )
-
-        evidence = QTextEdit()
-        form.addRow(
-            "Closeout Evidence",
-            evidence
-        )
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.Save |
-            QDialogButtonBox.Cancel
-        )
-
-        form.addRow(buttons)
-
-        buttons.rejected.connect(
-            dialog.reject
-        )
-
+        dialog=QDialog(self); dialog.setWindowTitle("New CAPA"); dialog.resize(850,750); dialog.setMinimumSize(700,550)
+        outer=QVBoxLayout(dialog); scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); scroll.setWidget(content); outer.addWidget(scroll)
+        source=QComboBox(); source.addItems(CAPA_SOURCES); form.addRow("Source:",source); reference=QLineEdit(); form.addRow("Reference Number:",reference)
+        finding=QTextEdit(); form.addRow("Finding:",finding); root=QTextEdit(); form.addRow("Root Cause:",root); corrective=QTextEdit(); form.addRow("Corrective Action:",corrective); preventive=QTextEdit(); form.addRow("Preventive Action:",preventive)
+        responsible=QLineEdit(); form.addRow("Responsible Person:",responsible); priority=QComboBox(); priority.addItems(PRIORITIES); form.addRow("Priority:",priority); target=QLineEdit(); form.addRow("Target Date:",target); status=QComboBox(); status.addItems(STATUSES); form.addRow("Status:",status); verification=QTextEdit(); form.addRow("Verification:",verification); evidence=QTextEdit(); form.addRow("Closeout Evidence:",evidence)
+        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel); outer.addWidget(buttons); buttons.rejected.connect(dialog.reject)
         def save():
-
-            number = next_number(
-                "HSE-CAPA",
-                "capa"
-            )
-
-            db.execute("""
-                INSERT INTO capa (
-                    number,source,reference_number,
-                    finding,root_cause,
-                    corrective_action,
-                    preventive_action,
-                    responsible,priority,
-                    target_date,status,
-                    verification,
-                    closeout_evidence,
-                    created_at
-                )
-                VALUES (
-                    ?,?,?,?,?,?,?,?,?,?,
-                    ?,?,?,?
-                )
-            """, (
-                number,
-                source.currentText(),
-                reference.text(),
-                finding.toPlainText(),
-                root.toPlainText(),
-                corrective.toPlainText(),
-                preventive.toPlainText(),
-                responsible.text(),
-                priority.currentText(),
-                target.text(),
-                status.currentText(),
-                verification.toPlainText(),
-                evidence.toPlainText(),
-                datetime.now().isoformat()
-            ))
-
-            dialog.accept()
-            refresh()
-
-        buttons.accepted.connect(save)
-
-        dialog.exec()
-
-    # ========================================================
-    # REPORTS
-    # ========================================================
+            try:
+                number=next_number("HSE-CAPA","capa")
+                db.execute("""INSERT INTO capa(number,source,reference_number,finding,root_cause,corrective_action,preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,source.currentText(),reference.text(),finding.toPlainText(),root.toPlainText(),corrective.toPlainText(),preventive.toPlainText(),responsible.text(),priority.currentText(),target.text(),status.currentText(),verification.toPlainText(),evidence.toPlainText(),datetime.now().isoformat()))
+                dialog.accept(); refresh()
+            except Exception as e:
+                logging.exception("CAPA save failed"); QMessageBox.critical(dialog,"Save Error",str(e))
+        buttons.accepted.connect(save); dialog.exec()
 
     def reports(self):
 
@@ -2498,172 +1952,19 @@ class MainWindow(QMainWindow):
 
     def settings_page(self):
 
-        w, layout = self.page(
-            "Settings"
-        )
-
-        form = QFormLayout()
-
-        company = QLineEdit(
-            db.setting(
-                "company_name",
-                ""
-            )
-        )
-
-        project = QLineEdit(
-            db.setting(
-                "project_name",
-                ""
-            )
-        )
-
-        location = QLineEdit(
-            db.setting(
-                "default_location",
-                ""
-            )
-        )
-
-        observer = QLineEdit(
-            db.setting(
-                "default_observer",
-                ""
-            )
-        )
-
-        footer = QLineEdit(
-            db.setting(
-                "report_footer",
-                ""
-            )
-        )
-
-        form.addRow(
-            "Company Name",
-            company
-        )
-
-        form.addRow(
-            "Project Name",
-            project
-        )
-
-        form.addRow(
-            "Default Location",
-            location
-        )
-
-        form.addRow(
-            "Default Observer",
-            observer
-        )
-
-        form.addRow(
-            "Report Footer",
-            footer
-        )
-
+        w, layout = self.page("Settings")
+        form=QFormLayout()
+        company=QLineEdit(db.setting("company_name","")); project=QLineEdit(db.setting("project_name","")); location=QLineEdit(db.setting("default_location","")); observer=QLineEdit(db.setting("default_observer","")); footer=QLineEdit(db.setting("report_footer",""))
+        for label,widget in [("Company Name",company),("Project Name",project),("Default Location",location),("Default Observer",observer),("Report Footer",footer)]: form.addRow(label,widget)
         layout.addLayout(form)
-
-        save = QPushButton(
-            "Save Settings"
-        )
-
-        layout.addWidget(save)
-
-        save.clicked.connect(
-            lambda: self.save_settings(
-                company,
-                project,
-                location,
-                observer,
-                footer
-            )
-        )
-
-        backup = QPushButton(
-            "Backup Complete Application Data"
-        )
-
-        layout.addWidget(backup)
-
-        backup.clicked.connect(
-            self.backup
-        )
-
-        restore = QPushButton(
-            "Restore Application Backup"
-        )
-
-        layout.addWidget(restore)
-
-        restore.clicked.connect(
-            self.restore
-        )
-
-        about = QPushButton(
-            "About"
-        )
-
-        layout.addWidget(about)
-
-        about.clicked.connect(
-            lambda: QMessageBox.information(
-                self,
-                "About",
-                f"{APP_NAME}\nVersion {APP_VERSION}\n\n"
-                "Offline HSE Management System"
-            )
-        )
-
-    # --------------------------------------------------------
-
-    def save_settings(
-        self,
-        company,
-        project,
-        location,
-        observer,
-        footer
-    ):
-
-        db.set_setting(
-            "company_name",
-            company.text()
-        )
-
-        db.set_setting(
-            "project_name",
-            project.text()
-        )
-
-        db.set_setting(
-            "default_location",
-            location.text()
-        )
-
-        db.set_setting(
-            "default_observer",
-            observer.text()
-        )
-
-        db.set_setting(
-            "report_footer",
-            footer.text()
-        )
-
-        QMessageBox.information(
-            self,
-            "Saved",
-            "Settings saved successfully."
-        )
-
-        self.dashboard()
-
-    # ========================================================
-    # BACKUP
-    # ========================================================
+        sap=QGroupBox("SAP"); sf=QFormLayout(sap); sap_enabled=QComboBox(); sap_enabled.addItems(["Disabled","Enabled"]); sap_enabled.setCurrentText(db.setting("sap_enabled","Disabled")); sap_server=QLineEdit(db.setting("sap_server","")); sap_client=QLineEdit(db.setting("sap_client","")); sap_env=QLineEdit(db.setting("sap_environment","")); sf.addRow("SAP Integration",sap_enabled); sf.addRow("SAP Server",sap_server); sf.addRow("SAP Client",sap_client); sf.addRow("SAP Environment",sap_env); layout.addWidget(sap)
+        save=QPushButton("Save Settings"); layout.addWidget(save)
+        def save_all():
+            self.save_settings(company,project,location,observer,footer); db.set_setting("sap_enabled",sap_enabled.currentText()); db.set_setting("sap_server",sap_server.text()); db.set_setting("sap_client",sap_client.text()); db.set_setting("sap_environment",sap_env.text())
+        save.clicked.connect(save_all)
+        backup=QPushButton("Backup Complete Application Data"); layout.addWidget(backup); backup.clicked.connect(self.backup)
+        restore=QPushButton("Restore Application Backup"); layout.addWidget(restore); restore.clicked.connect(self.restore)
+        about=QPushButton("About"); layout.addWidget(about); about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System"))
 
     def backup(self):
 
