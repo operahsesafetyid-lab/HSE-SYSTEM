@@ -9,8 +9,8 @@ import json
 from datetime import datetime, date
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QPixmap, QPainter, QPen, QBrush, QFont, QRectF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QFormLayout, QLineEdit, QTextEdit, QPushButton, QLabel,
