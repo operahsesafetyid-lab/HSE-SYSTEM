@@ -13,35 +13,46 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          clean: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Upgrade pip
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-
-      - name: Install application requirements
-        run: |
           python -m pip install -r requirements.txt
 
-      - name: Install PyInstaller
+      - name: Verify source
+        shell: powershell
         run: |
-          python -m pip install pyinstaller
-
-      - name: Check PyInstaller
-        run: |
+          $bad = Get-ChildItem -Path . -Recurse -Filter *.py | Select-String -Pattern "QRecF" -SimpleMatch
+          if ($bad) {
+            Write-Host "ERROR: Invalid QRecF reference found:"
+            $bad
+            exit 1
+          }
+          Write-Host "Source verification passed."
           python -m PyInstaller --version
 
-      - name: Build EXE
+      - name: Clean build folders
+        shell: powershell
         run: |
-          python -m PyInstaller --clean --noconfirm HSE-Management-System.spec
+          if (Test-Path build) { Remove-Item build -Recurse -Force }
+          if (Test-Path dist) { Remove-Item dist -Recurse -Force }
+          Get-ChildItem -Path . -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+
+      - name: Build Windows EXE
+        run: |
+          python -m PyInstaller --clean --noconfirm --onefile --windowed --name "HSE-Management-System" app/main.py
 
       - name: Upload EXE artifact
         uses: actions/upload-artifact@v4
         with:
           name: HSE-Management-System-Windows
-          path: dist/**
+          path: dist/HSE-Management-System.exe
           if-no-files-found: error
