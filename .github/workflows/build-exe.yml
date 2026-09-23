@@ -1,3 +1,5 @@
+name: Build HSE Management System
+
 on:
   push:
     branches:
@@ -22,11 +24,23 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
+
           python -m pip install PySide6
           python -m pip install reportlab
           python -m pip install openpyxl
+          python -m pip install python-docx
           python -m pip install Pillow
           python -m pip install pyinstaller
+
+      - name: Verify installed packages
+        shell: pwsh
+        run: |
+          python -c "import PySide6; print('PySide6 OK')"
+          python -c "import reportlab; print('reportlab OK')"
+          python -c "import openpyxl; print('openpyxl OK')"
+          python -c "import docx; print('python-docx OK')"
+          python -c "from PIL import Image; print('Pillow OK')"
+          python -c "import PyInstaller; print('PyInstaller OK')"
 
       - name: Verify source
         shell: pwsh
@@ -50,6 +64,11 @@ jobs:
         run: |
           python -m py_compile app/main.py
 
+      - name: Test DOCX import
+        shell: pwsh
+        run: |
+          python -c "from docx import Document; print('DOCX module loaded successfully.')"
+
       - name: Build EXE
         shell: pwsh
         run: |
@@ -70,6 +89,7 @@ jobs:
           }
 
           $size = (Get-Item "dist/HSE-Management-System.exe").Length
+
           Write-Host "EXE created successfully."
           Write-Host "Size: $size bytes"
 
