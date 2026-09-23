@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox,
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
-    QHeaderView, QAbstractItemView, QCheckBox
+    QHeaderView, QAbstractItemView, QCheckBox, QScrollArea
 )
 
 from reportlab.lib import colors
@@ -1116,9 +1116,15 @@ class MainWindow(QMainWindow):
         add_button = QPushButton("+ New Observation")
         delete_button = QPushButton("Delete Selected")
         export_button = QPushButton("Export CSV")
+        excel_button = QPushButton("Export Excel")
+        pdf_button = QPushButton("Export PDF")
+        word_button = QPushButton("Export Word")
         toolbar.addWidget(add_button)
         toolbar.addWidget(delete_button)
         toolbar.addWidget(export_button)
+        toolbar.addWidget(excel_button)
+        toolbar.addWidget(pdf_button)
+        toolbar.addWidget(word_button)
         layout.addLayout(toolbar)
 
         table = QTableWidget()
@@ -1189,18 +1195,30 @@ class MainWindow(QMainWindow):
         search.textChanged.connect(load)
         add_button.clicked.connect(lambda: self.observation_form(load))
         delete_button.clicked.connect(delete_selected)
-        export_button.clicked.connect(lambda: self.export_table(table, "HSE_Observations"))
+        export_button.clicked.connect(lambda: self.export_csv("observations"))
+        excel_button.clicked.connect(lambda: self.export_excel("observations"))
+        pdf_button.clicked.connect(lambda: self.export_pdf("observations"))
+        word_button.clicked.connect(lambda: self.export_docx("observations"))
         load()
 
 
 
     def observation_form(self, refresh):
         dialog = QDialog(self)
-        dialog.setWindowTitle("New HSE Observation")
-        dialog.resize(850, 800)
+        dialog.setWindowTitle("New HSE Observation / Inspection")
+        dialog.resize(980, 820)
+        dialog.setMinimumSize(900, 700)
         outer = QVBoxLayout(dialog)
-        scroll_area = QWidget()
-        form = QFormLayout(scroll_area)
+
+        header = QLabel("HSE Inspection Observation")
+        header.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
+        outer.addWidget(header)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        content = QWidget()
+        form = QFormLayout(content)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         edits = {}
 
         def edit(name):
@@ -1209,8 +1227,8 @@ class MainWindow(QMainWindow):
             form.addRow(name.replace("_", " ").title() + ":", e)
             return e
 
-        for name in ["project","company","location","area","responsible","designation","employee_id",
-                     "observer","observer_designation","observer_id","observer_company"]:
+        for name in ["project", "company", "location", "area", "responsible", "designation", "employee_id",
+                     "observer", "observer_designation", "observer_id", "observer_company"]:
             edit(name)
 
         obs_type = QComboBox(); obs_type.addItems(OBS_TYPES)
@@ -1219,10 +1237,14 @@ class MainWindow(QMainWindow):
         form.addRow("Category:", category)
         edit("subcategory")
 
-        observation = QTextEdit(); form.addRow("Observation Description:", observation)
-        immediate = QTextEdit(); form.addRow("Immediate Action:", immediate)
-        corrective = QTextEdit(); form.addRow("Corrective Action:", corrective)
-        preventive = QTextEdit(); form.addRow("Preventive Action:", preventive)
+        observation = QTextEdit(); observation.setMinimumHeight(100)
+        form.addRow("Observation Description:", observation)
+        immediate = QTextEdit(); immediate.setMinimumHeight(80)
+        form.addRow("Immediate Action:", immediate)
+        corrective = QTextEdit(); corrective.setMinimumHeight(80)
+        form.addRow("Corrective Action:", corrective)
+        preventive = QTextEdit(); preventive.setMinimumHeight(80)
+        form.addRow("Preventive Action:", preventive)
 
         priority = QComboBox(); priority.addItems(PRIORITIES)
         form.addRow("Priority:", priority)
@@ -1233,8 +1255,10 @@ class MainWindow(QMainWindow):
 
         attachment_paths = []
         attachment_label = QLabel("No evidence files selected.")
-
+        attachment_label.setWordWrap(True)
         attach_button = QPushButton("Attach Evidence Files")
+        attach_button.setMinimumHeight(36)
+
         def choose_files():
             paths, _ = QFileDialog.getOpenFileNames(
                 dialog, "Select Evidence Files", "",
@@ -1244,54 +1268,71 @@ class MainWindow(QMainWindow):
                 attachment_paths.clear()
                 attachment_paths.extend(paths)
                 attachment_label.setText("\n".join(Path(p).name for p in paths))
-        attach_button.clicked.connect(choose_files)
-        form.addRow("Evidence:", attach_button)
-        form.addRow("", attachment_label)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        form.addRow(buttons)
-        buttons.rejected.connect(dialog.reject)
+        attach_button.clicked.connect(choose_files)
+        form.addRow("Evidence / Attachments:", attach_button)
+        form.addRow("Selected Files:", attachment_label)
+
+        scroll_area.setWidget(content)
+        outer.addWidget(scroll_area, 1)
+
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Save Observation", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.setMinimumHeight(40)
+        cancel_button.setMinimumHeight(40)
+        outer.addWidget(buttons)
+        cancel_button.clicked.connect(dialog.reject)
 
         def save():
             if not edits["location"].text().strip():
-                QMessageBox.warning(dialog, "Required", "Location is required."); return
+                QMessageBox.warning(dialog, "Required", "Location is required.")
+                return
             if not observation.toPlainText().strip():
-                QMessageBox.warning(dialog, "Required", "Observation description is required."); return
-            number = next_number("HSE-OBS", "observations")
-            db.execute("""
-                INSERT INTO observations (
-                    number, obs_date, obs_time, project, company, location, area,
-                    responsible, designation, employee_id, observer, observer_designation,
-                    observer_id, observer_company, obs_type, category, subcategory,
-                    observation, immediate_action, corrective_action, preventive_action,
-                    priority, target_date, status, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """, (
-                number, today(), now_time(), edits["project"].text(), edits["company"].text(),
-                edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
-                edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
-                edits["observer_designation"].text(), edits["observer_id"].text(),
-                edits["observer_company"].text(), obs_type.currentText(), category.currentText(),
-                edits["subcategory"].text(), observation.toPlainText(), immediate.toPlainText(),
-                corrective.toPlainText(), preventive.toPlainText(), priority.currentText(),
-                target.date().toString("yyyy-MM-dd"), status.currentText(), datetime.now().isoformat()
-            ))
-            row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
-            if row:
-                copy_attachments(attachment_paths, number, "observation_attachments", row["id"])
-            dialog.accept()
-            refresh()
+                QMessageBox.warning(dialog, "Required", "Observation description is required.")
+                return
+            try:
+                number = next_number("HSE-OBS", "observations")
+                db.execute("""
+                    INSERT INTO observations (
+                        number, obs_date, obs_time, project, company, location, area,
+                        responsible, designation, employee_id, observer, observer_designation,
+                        observer_id, observer_company, obs_type, category, subcategory,
+                        observation, immediate_action, corrective_action, preventive_action,
+                        priority, target_date, status, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    number, today(), now_time(), edits["project"].text(), edits["company"].text(),
+                    edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
+                    edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
+                    edits["observer_designation"].text(), edits["observer_id"].text(),
+                    edits["observer_company"].text(), obs_type.currentText(), category.currentText(),
+                    edits["subcategory"].text(), observation.toPlainText(), immediate.toPlainText(),
+                    corrective.toPlainText(), preventive.toPlainText(), priority.currentText(),
+                    target.date().toString("yyyy-MM-dd"), status.currentText(), datetime.now().isoformat()
+                ))
+                row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
+                if row and attachment_paths:
+                    copy_attachments(attachment_paths, number, "observation_attachments", row["id"])
+                dialog.accept()
+                refresh()
+            except Exception as e:
+                logging.exception("Observation save failed")
+                QMessageBox.critical(dialog, "Save Error", f"Unable to save observation.\n\n{e}")
 
-        buttons.accepted.connect(save)
-        scroll_layout = QVBoxLayout()
-        scroll_layout.addWidget(scroll_area)
-        outer.addLayout(scroll_layout)
+        save_button.clicked.connect(save)
         dialog.exec()
-
-
 
     def incidents(self):
         w, layout = self.page("Accident / Incident Investigation")
+        banner = QHBoxLayout()
+        logo = QLabel(); logo.setFixedSize(80, 60); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_path = db.setting("company_logo", "")
+        if logo_path and Path(logo_path).exists():
+            logo.setPixmap(QPixmap(logo_path).scaled(70, 55, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        banner.addWidget(logo)
+        banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"), 1)
+        layout.addLayout(banner)
         toolbar = QHBoxLayout()
         add_button = QPushButton("+ New Incident")
         report_button = QPushButton("Generate Word Report")
@@ -1344,93 +1385,128 @@ class MainWindow(QMainWindow):
 
     def incident_form(self, refresh):
         dialog = QDialog(self)
-        dialog.setWindowTitle("New Incident Investigation")
-        dialog.resize(900, 850)
+        dialog.setWindowTitle("New Accident / Incident Investigation")
+        dialog.resize(1000, 900)
+        dialog.setMinimumSize(920, 760)
         outer = QVBoxLayout(dialog)
-        scroll = QWidget()
-        form = QFormLayout(scroll)
+
+        title = QLabel("ACCIDENT / INCIDENT INVESTIGATION")
+        title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
+        outer.addWidget(title)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        content = QWidget()
+        form = QFormLayout(content)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         edits = {}
 
         def add_edit(name):
             e = QLineEdit(); edits[name] = e
-            form.addRow(name.replace("_", " ").title(), e)
+            form.addRow(name.replace("_", " ").title() + ":", e)
+            return e
 
-        for name in ["incident_time","location","project","company","department","activity",
-                     "person_involved","employee_id","designation","supervisor","witnesses","equipment"]:
+        for name in ["incident_time", "location", "project", "company", "department", "activity",
+                     "person_involved", "employee_id", "designation", "supervisor", "witnesses", "equipment"]:
             add_edit(name)
 
         incident_type = QComboBox(); incident_type.addItems(INCIDENT_TYPES)
-        form.addRow("Incident Type", incident_type)
-        description = QTextEdit(); form.addRow("Incident Description", description)
-        immediate = QTextEdit(); form.addRow("Immediate Action", immediate)
-        consequences = QTextEdit(); form.addRow("Actual Consequences", consequences)
-        potential = QTextEdit(); form.addRow("Potential Consequences", potential)
+        form.addRow("Type of Incident:", incident_type)
+
+        description = QTextEdit(); description.setMinimumHeight(110)
+        form.addRow("Incident Description:", description)
+        immediate = QTextEdit(); immediate.setMinimumHeight(80)
+        form.addRow("Immediate Action:", immediate)
+        consequences = QTextEdit(); consequences.setMinimumHeight(80)
+        form.addRow("Actual Consequences:", consequences)
+        potential = QTextEdit(); potential.setMinimumHeight(80)
+        form.addRow("Potential Consequences:", potential)
 
         method = QComboBox(); method.addItems(INVESTIGATION_METHODS)
-        form.addRow("Investigation Method", method)
+        form.addRow("Investigation Method:", method)
 
         whys = []
-        for i in range(1,6):
-            e=QLineEdit(); whys.append(e); form.addRow(f"Why {i}", e)
-        direct = QTextEdit(); form.addRow("Direct Cause", direct)
-        contributing = QTextEdit(); form.addRow("Contributing Factors", contributing)
-        root = QTextEdit(); form.addRow("Root Cause", root)
-        corrective = QTextEdit(); form.addRow("Corrective Action", corrective)
-        preventive = QTextEdit(); form.addRow("Preventive Action", preventive)
+        for i in range(1, 6):
+            e = QLineEdit(); whys.append(e)
+            form.addRow(f"Why {i}:", e)
 
-        attachment_paths=[]
-        attachment_label=QLabel("No evidence files selected.")
-        attach_button=QPushButton("Attach Evidence Files")
+        direct = QTextEdit(); direct.setMinimumHeight(80)
+        form.addRow("Direct Cause:", direct)
+        contributing = QTextEdit(); contributing.setMinimumHeight(80)
+        form.addRow("Contributing Factors:", contributing)
+        root = QTextEdit(); root.setMinimumHeight(80)
+        form.addRow("Root Cause:", root)
+        corrective = QTextEdit(); corrective.setMinimumHeight(80)
+        form.addRow("Corrective Action:", corrective)
+        preventive = QTextEdit(); preventive.setMinimumHeight(80)
+        form.addRow("Preventive Action:", preventive)
+
+        attachment_paths = []
+        attachment_label = QLabel("No evidence files selected.")
+        attachment_label.setWordWrap(True)
+        attach_button = QPushButton("Attach Evidence Files")
+        attach_button.setMinimumHeight(36)
+
         def choose_files():
-            paths,_=QFileDialog.getOpenFileNames(
-                dialog,"Select Evidence Files","",
+            paths, _ = QFileDialog.getOpenFileNames(
+                dialog, "Select Investigation Evidence", "",
                 "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
             )
             if paths:
                 attachment_paths.clear(); attachment_paths.extend(paths)
                 attachment_label.setText("\n".join(Path(p).name for p in paths))
-        attach_button.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments", attach_button)
-        form.addRow("", attachment_label)
 
-        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
-        form.addRow(buttons)
-        buttons.rejected.connect(dialog.reject)
+        attach_button.clicked.connect(choose_files)
+        form.addRow("Evidence / Attachments:", attach_button)
+        form.addRow("Selected Files:", attachment_label)
+
+        scroll_area.setWidget(content)
+        outer.addWidget(scroll_area, 1)
+
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Save Investigation", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40)
+        outer.addWidget(buttons)
+        cancel_button.clicked.connect(dialog.reject)
 
         def save():
             if not edits["location"].text().strip():
-                QMessageBox.warning(dialog,"Required","Location is required."); return
-            number=next_number("HSE-INC","incidents")
-            db.execute("""
-                INSERT INTO incidents (
-                    number, incident_date, incident_time, location, project, company, department,
-                    activity, incident_type, person_involved, employee_id, designation, supervisor,
-                    witnesses, description, immediate_action, consequences, potential_consequences,
-                    equipment, investigation_method, why1, why2, why3, why4, why5,
-                    direct_cause, contributing_factors, root_cause, corrective_action,
-                    preventive_action, created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,(
-                number,today(),edits["incident_time"].text(),edits["location"].text(),
-                edits["project"].text(),edits["company"].text(),edits["department"].text(),
-                edits["activity"].text(),incident_type.currentText(),edits["person_involved"].text(),
-                edits["employee_id"].text(),edits["designation"].text(),edits["supervisor"].text(),
-                edits["witnesses"].text(),description.toPlainText(),immediate.toPlainText(),
-                consequences.toPlainText(),potential.toPlainText(),edits["equipment"].text(),
-                method.currentText(),*[x.text() for x in whys],direct.toPlainText(),
-                contributing.toPlainText(),root.toPlainText(),corrective.toPlainText(),
-                preventive.toPlainText(),datetime.now().isoformat()
-            ))
-            row=db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))
-            if row:
-                copy_attachments(attachment_paths,number,"incident_attachments",row["id"])
-            dialog.accept(); refresh()
+                QMessageBox.warning(dialog, "Required", "Location is required.")
+                return
+            try:
+                number = next_number("HSE-INC", "incidents")
+                db.execute("""
+                    INSERT INTO incidents (
+                        number, incident_date, incident_time, location, project, company, department,
+                        activity, incident_type, person_involved, employee_id, designation, supervisor,
+                        witnesses, description, immediate_action, consequences, potential_consequences,
+                        equipment, investigation_method, why1, why2, why3, why4, why5,
+                        direct_cause, contributing_factors, root_cause, corrective_action,
+                        preventive_action, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    number, today(), edits["incident_time"].text(), edits["location"].text(),
+                    edits["project"].text(), edits["company"].text(), edits["department"].text(),
+                    edits["activity"].text(), incident_type.currentText(), edits["person_involved"].text(),
+                    edits["employee_id"].text(), edits["designation"].text(), edits["supervisor"].text(),
+                    edits["witnesses"].text(), description.toPlainText(), immediate.toPlainText(),
+                    consequences.toPlainText(), potential.toPlainText(), edits["equipment"].text(),
+                    method.currentText(), *[x.text() for x in whys], direct.toPlainText(),
+                    contributing.toPlainText(), root.toPlainText(), corrective.toPlainText(),
+                    preventive.toPlainText(), datetime.now().isoformat()
+                ))
+                row = db.fetchone("SELECT id FROM incidents WHERE number=?", (number,))
+                if row and attachment_paths:
+                    copy_attachments(attachment_paths, number, "incident_attachments", row["id"])
+                dialog.accept()
+                refresh()
+            except Exception as e:
+                logging.exception("Incident save failed")
+                QMessageBox.critical(dialog, "Save Error", f"Unable to save investigation.\n\n{e}")
 
-        buttons.accepted.connect(save)
-        outer.addWidget(scroll)
+        save_button.clicked.connect(save)
         dialog.exec()
-
-
 
     def audits(self):
         w, layout = self.page("Audit Register")
@@ -1475,77 +1551,119 @@ class MainWindow(QMainWindow):
 
 
     def audit_form(self, refresh):
-        dialog=QDialog(self); dialog.setWindowTitle("New Audit"); dialog.resize(850,800)
-        outer=QVBoxLayout(dialog); scroll=QWidget(); form=QFormLayout(scroll); edits={}
+        dialog = QDialog(self)
+        dialog.setWindowTitle("New Audit")
+        dialog.resize(1000, 900)
+        dialog.setMinimumSize(920, 760)
+        outer = QVBoxLayout(dialog)
+
+        title = QLabel("AUDIT REGISTER - NEW AUDIT")
+        title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
+        outer.addWidget(title)
+
+        scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
+        content = QWidget(); form = QFormLayout(content)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        edits = {}
+
         def edit(name):
-            e=QLineEdit(); edits[name]=e; form.addRow(name.replace("_"," ").title(),e); return e
+            e = QLineEdit(); edits[name] = e
+            form.addRow(name.replace("_", " ").title() + ":", e)
+            return e
 
-        standard=QComboBox(); standard.addItems(["ISO 45001","ISO 14001"]); form.addRow("Standard",standard)
-        audit_type=QComboBox(); audit_type.addItems(AUDIT_TYPES); form.addRow("Audit Type",audit_type)
-        for name in ["project","location","department","auditor","lead_auditor","auditee","start_time","end_time"]: edit(name)
-        scope=QTextEdit(); form.addRow("Scope",scope)
-        objective=QTextEdit(); form.addRow("Objective",objective)
-        criteria=QTextEdit(); form.addRow("Audit Criteria",criteria)
+        standard = QComboBox(); standard.addItems(["ISO 45001", "ISO 14001"])
+        form.addRow("Standard:", standard)
+        audit_type = QComboBox(); audit_type.addItems(AUDIT_TYPES)
+        form.addRow("Audit Type:", audit_type)
+        for name in ["project", "location", "department", "auditor", "lead_auditor", "auditee", "start_time", "end_time"]:
+            edit(name)
 
-        clause=QComboBox()
-        clause.addItems(list(ISO_CLAUSES["ISO 45001"].keys()))
-        sub_clause=QComboBox()
+        scope = QTextEdit(); scope.setMinimumHeight(70); form.addRow("Scope:", scope)
+        objective = QTextEdit(); objective.setMinimumHeight(70); form.addRow("Objective:", objective)
+        criteria = QTextEdit(); criteria.setMinimumHeight(70); form.addRow("Audit Criteria:", criteria)
+
+        clause = QComboBox()
+        sub_clause = QComboBox()
+        form.addRow("ISO Clause:", clause)
+        form.addRow("ISO Sub-Clause:", sub_clause)
+
+        def load_clauses():
+            clause.blockSignals(True)
+            clause.clear()
+            clause.addItems(list(ISO_CLAUSES.get(standard.currentText(), {}).keys()))
+            clause.blockSignals(False)
+            load_subclauses()
+
         def load_subclauses():
             sub_clause.clear()
-            for item in ISO_CLAUSES.get(standard.currentText(),{}).get(clause.currentText(),[]):
-                sub_clause.addItem(item)
-        standard.currentTextChanged.connect(load_subclauses)
+            items = ISO_CLAUSES.get(standard.currentText(), {}).get(clause.currentText(), [])
+            sub_clause.addItems(items)
+
+        standard.currentTextChanged.connect(load_clauses)
         clause.currentTextChanged.connect(load_subclauses)
-        form.addRow("Clause",clause); form.addRow("Sub-Clause",sub_clause)
-        load_subclauses()
+        load_clauses()
 
-        requirement=QTextEdit(); form.addRow("Requirement / Criterion",requirement)
-        finding_type=QComboBox(); finding_type.addItems(FINDING_TYPES); form.addRow("Finding Type",finding_type)
-        finding=QTextEdit(); form.addRow("Finding / Evidence",finding)
-        risk=QTextEdit(); form.addRow("Risk / Impact",risk)
-        corrective=QTextEdit(); form.addRow("Corrective Action",corrective)
-        responsible=QLineEdit(); form.addRow("Responsible Person",responsible)
-        target=QLineEdit(); form.addRow("Target Date",target)
+        requirement = QTextEdit(); requirement.setMinimumHeight(70); form.addRow("Requirement / Criterion:", requirement)
+        finding_type = QComboBox(); finding_type.addItems(FINDING_TYPES); form.addRow("Finding Type:", finding_type)
+        finding = QTextEdit(); finding.setMinimumHeight(90); form.addRow("Finding / Evidence:", finding)
+        risk = QTextEdit(); risk.setMinimumHeight(70); form.addRow("Risk / Impact:", risk)
+        corrective = QTextEdit(); corrective.setMinimumHeight(70); form.addRow("Corrective Action:", corrective)
+        responsible = QLineEdit(); form.addRow("Responsible Person:", responsible)
+        target = QLineEdit(); form.addRow("Target Date:", target)
 
-        attachment_paths=[]; attachment_label=QLabel("No evidence files selected.")
-        attach=QPushButton("Attach Evidence Files")
+        attachment_paths = []; attachment_label = QLabel("No evidence files selected."); attachment_label.setWordWrap(True)
+        attach = QPushButton("Attach Audit Evidence Files"); attach.setMinimumHeight(36)
         def choose_files():
-            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Audit Evidence","",
-                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            paths, _ = QFileDialog.getOpenFileNames(
+                dialog, "Select Audit Evidence", "",
+                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
+            )
             if paths:
                 attachment_paths.clear(); attachment_paths.extend(paths)
                 attachment_label.setText("\n".join(Path(p).name for p in paths))
         attach.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments",attach); form.addRow("",attachment_label)
+        form.addRow("Evidence / Attachments:", attach); form.addRow("Selected Files:", attachment_label)
 
-        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
-        form.addRow(buttons); buttons.rejected.connect(dialog.reject)
+        scroll_area.setWidget(content); outer.addWidget(scroll_area, 1)
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Save Audit", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40)
+        outer.addWidget(buttons); cancel_button.clicked.connect(dialog.reject)
 
         def save():
-            number=next_number("HSE-AUD","audits")
-            db.execute("""
-                INSERT INTO audits (number,audit_date,audit_type,standard,project,location,department,
-                    auditor,lead_auditor,auditee,scope,objective,criteria,start_time,end_time,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,(number,today(),audit_type.currentText(),standard.currentText(),edits["project"].text(),
-                 edits["location"].text(),edits["department"].text(),edits["auditor"].text(),
-                 edits["lead_auditor"].text(),edits["auditee"].text(),scope.toPlainText(),
-                 objective.toPlainText(),criteria.toPlainText(),edits["start_time"].text(),
-                 edits["end_time"].text(),datetime.now().isoformat()))
-            audit=db.fetchone("SELECT id FROM audits WHERE number=?",(number,))
-            db.execute("""
-                INSERT INTO audit_findings (audit_id,clause,sub_clause,requirement,finding_type,
-                    observation,evidence,risk_impact,corrective_action,responsible,target_date)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """,(audit["id"],clause.currentText(),sub_clause.currentText(),requirement.toPlainText(),
-                 finding_type.currentText(),finding.toPlainText(),finding.toPlainText(),risk.toPlainText(),
-                 corrective.toPlainText(),responsible.text(),target.text()))
-            copy_attachments(attachment_paths,number,"audit_attachments",audit["id"])
-            dialog.accept(); refresh()
-        buttons.accepted.connect(save)
-        outer.addWidget(scroll); dialog.exec()
+            try:
+                number = next_number("HSE-AUD", "audits")
+                db.execute("""
+                    INSERT INTO audits (number,audit_date,audit_type,standard,project,location,department,
+                        auditor,lead_auditor,auditee,scope,objective,criteria,start_time,end_time,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    number, today(), audit_type.currentText(), standard.currentText(), edits["project"].text(),
+                    edits["location"].text(), edits["department"].text(), edits["auditor"].text(),
+                    edits["lead_auditor"].text(), edits["auditee"].text(), scope.toPlainText(),
+                    objective.toPlainText(), criteria.toPlainText(), edits["start_time"].text(),
+                    edits["end_time"].text(), datetime.now().isoformat()
+                ))
+                audit = db.fetchone("SELECT id FROM audits WHERE number=?", (number,))
+                db.execute("""
+                    INSERT INTO audit_findings (audit_id,clause,sub_clause,requirement,finding_type,
+                        observation,evidence,risk_impact,corrective_action,responsible,target_date)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    audit["id"], clause.currentText(), sub_clause.currentText(), requirement.toPlainText(),
+                    finding_type.currentText(), finding.toPlainText(), finding.toPlainText(), risk.toPlainText(),
+                    corrective.toPlainText(), responsible.text(), target.text()
+                ))
+                if attachment_paths:
+                    copy_attachments(attachment_paths, number, "audit_attachments", audit["id"])
+                dialog.accept(); refresh()
+            except Exception as e:
+                logging.exception("Audit save failed")
+                QMessageBox.critical(dialog, "Save Error", f"Unable to save audit.\n\n{e}")
 
-
+        save_button.clicked.connect(save)
+        dialog.exec()
 
     def capa(self):
         w,layout=self.page("CAPA Register")
@@ -1574,175 +1692,297 @@ class MainWindow(QMainWindow):
 
 
     def capa_form(self, refresh):
-        dialog=QDialog(self); dialog.setWindowTitle("New CAPA"); dialog.resize(800,750)
-        outer=QVBoxLayout(dialog); scroll=QWidget(); form=QFormLayout(scroll)
-        source=QComboBox(); source.addItems(CAPA_SOURCES); form.addRow("Source",source)
-        reference=QLineEdit(); form.addRow("Reference Number",reference)
-        finding=QTextEdit(); form.addRow("Finding",finding)
-        root=QTextEdit(); form.addRow("Root Cause",root)
-        corrective=QTextEdit(); form.addRow("Corrective Action",corrective)
-        preventive=QTextEdit(); form.addRow("Preventive Action",preventive)
-        responsible=QLineEdit(); form.addRow("Responsible Person",responsible)
-        priority=QComboBox(); priority.addItems(PRIORITIES); form.addRow("Priority",priority)
-        target=QLineEdit(); form.addRow("Target Date",target)
-        status=QComboBox(); status.addItems(STATUSES); form.addRow("Status",status)
-        verification=QTextEdit(); form.addRow("Verification",verification)
-        evidence=QTextEdit(); form.addRow("Closeout Evidence",evidence)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("New CAPA")
+        dialog.resize(950, 850)
+        dialog.setMinimumSize(900, 720)
+        outer = QVBoxLayout(dialog)
 
-        attachment_paths=[]; attachment_label=QLabel("No evidence files selected.")
-        attach=QPushButton("Attach Evidence Files")
+        title = QLabel("CORRECTIVE AND PREVENTIVE ACTION (CAPA)")
+        title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
+        outer.addWidget(title)
+
+        scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
+        content = QWidget(); form = QFormLayout(content)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        source = QComboBox(); source.addItems(CAPA_SOURCES); form.addRow("Source:", source)
+        reference = QLineEdit(); form.addRow("Reference Number:", reference)
+        finding = QTextEdit(); finding.setMinimumHeight(90); form.addRow("Finding:", finding)
+        root = QTextEdit(); root.setMinimumHeight(90); form.addRow("Root Cause:", root)
+        corrective = QTextEdit(); corrective.setMinimumHeight(90); form.addRow("Corrective Action:", corrective)
+        preventive = QTextEdit(); preventive.setMinimumHeight(90); form.addRow("Preventive Action:", preventive)
+        responsible = QLineEdit(); form.addRow("Responsible Person:", responsible)
+        priority = QComboBox(); priority.addItems(PRIORITIES); form.addRow("Priority:", priority)
+        target = QLineEdit(); form.addRow("Target Date:", target)
+        status = QComboBox(); status.addItems(STATUSES); form.addRow("Status:", status)
+        verification = QTextEdit(); verification.setMinimumHeight(70); form.addRow("Verification:", verification)
+        evidence = QTextEdit(); evidence.setMinimumHeight(70); form.addRow("Closeout Evidence:", evidence)
+
+        attachment_paths = []; attachment_label = QLabel("No evidence files selected."); attachment_label.setWordWrap(True)
+        attach = QPushButton("Attach CAPA Evidence Files"); attach.setMinimumHeight(36)
         def choose_files():
-            paths,_=QFileDialog.getOpenFileNames(dialog,"Select CAPA Evidence","",
-                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            paths, _ = QFileDialog.getOpenFileNames(
+                dialog, "Select CAPA Evidence", "",
+                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
+            )
             if paths:
-                attachment_paths.clear(); attachment_paths.extend(paths); attachment_label.setText("\n".join(Path(p).name for p in paths))
+                attachment_paths.clear(); attachment_paths.extend(paths)
+                attachment_label.setText("\n".join(Path(p).name for p in paths))
         attach.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments",attach); form.addRow("",attachment_label)
+        form.addRow("Evidence / Attachments:", attach); form.addRow("Selected Files:", attachment_label)
 
-        buttons=QDialogButtonBox(QDialogButtonBox.Save|QDialogButtonBox.Cancel)
-        form.addRow(buttons); buttons.rejected.connect(dialog.reject)
+        scroll_area.setWidget(content); outer.addWidget(scroll_area, 1)
+        buttons = QDialogButtonBox()
+        save_button = buttons.addButton("Save CAPA", QDialogButtonBox.ButtonRole.AcceptRole)
+        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
+        save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40)
+        outer.addWidget(buttons); cancel_button.clicked.connect(dialog.reject)
+
         def save():
-            number=next_number("HSE-CAPA","capa")
-            db.execute("""
-                INSERT INTO capa (number,source,reference_number,finding,root_cause,corrective_action,
-                    preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-            """,(number,source.currentText(),reference.text(),finding.toPlainText(),root.toPlainText(),
-                 corrective.toPlainText(),preventive.toPlainText(),responsible.text(),priority.currentText(),
-                 target.text(),status.currentText(),verification.toPlainText(),evidence.toPlainText(),
-                 datetime.now().isoformat()))
-            row=db.fetchone("SELECT id FROM capa WHERE number=?",(number,))
-            copy_attachments(attachment_paths,number,"capa_attachments",row["id"])
-            dialog.accept(); refresh()
-        buttons.accepted.connect(save); outer.addWidget(scroll); dialog.exec()
+            try:
+                number = next_number("HSE-CAPA", "capa")
+                db.execute("""
+                    INSERT INTO capa (number,source,reference_number,finding,root_cause,corrective_action,
+                        preventive_action,responsible,priority,target_date,status,verification,closeout_evidence,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    number, source.currentText(), reference.text(), finding.toPlainText(), root.toPlainText(),
+                    corrective.toPlainText(), preventive.toPlainText(), responsible.text(), priority.currentText(),
+                    target.text(), status.currentText(), verification.toPlainText(), evidence.toPlainText(),
+                    datetime.now().isoformat()
+                ))
+                row = db.fetchone("SELECT id FROM capa WHERE number=?", (number,))
+                if row and attachment_paths:
+                    copy_attachments(attachment_paths, number, "capa_attachments", row["id"])
+                dialog.accept(); refresh()
+            except Exception as e:
+                logging.exception("CAPA save failed")
+                QMessageBox.critical(dialog, "Save Error", f"Unable to save CAPA.\n\n{e}")
 
-
+        save_button.clicked.connect(save)
+        dialog.exec()
 
     def reports(self):
-        w,layout=self.page("Reports & Export")
-        info=QLabel("Generate CSV, Excel, PDF and Word reports using the company information and logo stored in Settings.")
+        w, layout = self.page("Reports & Export")
+        banner = QHBoxLayout()
+        logo_path = db.setting("company_logo", "")
+        logo = QLabel()
+        logo.setFixedSize(90, 70)
+        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if logo_path and Path(logo_path).exists():
+            pix = QPixmap(logo_path)
+            logo.setPixmap(pix.scaled(80, 65, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        banner.addWidget(logo)
+        company_label = QLabel(f"<b>{safe(company_name())}</b><br>Reports & Export<br>Project: {safe(db.setting('project_name',''))}")
+        company_label.setStyleSheet("font-size:16px;padding:6px;")
+        banner.addWidget(company_label, 1)
+        open_folder = QPushButton("Open Reports Folder")
+        open_folder.clicked.connect(self.open_reports_folder)
+        banner.addWidget(open_folder)
+        layout.addLayout(banner)
+
+        info = QLabel("Select a register and format. The report is extracted from the saved HSE database and can be saved to any folder on the computer.")
+        info.setWordWrap(True)
         layout.addWidget(info)
-        for title,table_name in [
-            ("HSE Observation Report","observations"),
-            ("Incident Report","incidents"),
-            ("Audit Report","audits"),
-            ("CAPA Report","capa")
+
+        for title, table_name in [
+            ("HSE Inspection / Observation Report", "observations"),
+            ("Incident Investigation Register Report", "incidents"),
+            ("Audit Register Report", "audits"),
+            ("CAPA Register Report", "capa")
         ]:
-            box=QGroupBox(title); row=QHBoxLayout(box)
+            box = QGroupBox(title)
+            row = QHBoxLayout(box)
             for label, handler in [
-                ("CSV", lambda t=table_name:self.export_csv(t)),
-                ("Excel", lambda t=table_name:self.export_excel(t)),
-                ("PDF", lambda t=table_name:self.export_pdf(t)),
-                ("Word", lambda t=table_name:self.export_docx(t))
+                ("Download CSV", lambda t=table_name: self.export_csv(t)),
+                ("Download Excel", lambda t=table_name: self.export_excel(t)),
+                ("Download PDF", lambda t=table_name: self.export_pdf(t)),
+                ("Download Word", lambda t=table_name: self.export_docx(t))
             ]:
-                b=QPushButton(label); row.addWidget(b); b.clicked.connect(handler)
+                b = QPushButton(label)
+                b.setMinimumHeight(38)
+                row.addWidget(b)
+                b.clicked.connect(handler)
             layout.addWidget(box)
 
-        incident_box=QGroupBox("Professional Incident Investigation Word Report")
-        ir=QHBoxLayout(incident_box)
-        incident_combo=QComboBox()
-        incidents=db.fetchall("SELECT id,number FROM incidents ORDER BY id DESC")
-        for row in incidents: incident_combo.addItem(safe(row["number"]),row["id"])
-        ir.addWidget(incident_combo)
-        b=QPushButton("Generate Investigation Word Report"); ir.addWidget(b)
+        incident_box = QGroupBox("Professional Incident Investigation Word Report")
+        ir = QHBoxLayout(incident_box)
+        incident_combo = QComboBox()
+        incidents = db.fetchall("SELECT id,number FROM incidents ORDER BY id DESC")
+        for row in incidents:
+            incident_combo.addItem(safe(row["number"]), row["id"])
+        ir.addWidget(QLabel("Investigation:"))
+        ir.addWidget(incident_combo, 1)
+        b = QPushButton("Download Investigation Report")
+        b.setMinimumHeight(38)
+        ir.addWidget(b)
+
         def generate():
-            if incident_combo.count()==0:
-                QMessageBox.information(self,"No Incidents","No incident investigations are available."); return
-            incident_id=incident_combo.currentData(); number=incident_combo.currentText()
-            path,_=QFileDialog.getSaveFileName(self,"Save Investigation Report",f"{number}_Investigation_Report.docx","Word Document (*.docx)")
-            if not path:return
+            if incident_combo.count() == 0:
+                QMessageBox.information(self, "No Incidents", "No incident investigations are available.")
+                return
+            incident_id = incident_combo.currentData()
+            number = incident_combo.currentText()
+            default_path = str(REPORT_DIR / f"{number}_Investigation_Report.docx")
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Investigation Report", default_path, "Word Document (*.docx)"
+            )
+            if not path:
+                return
             try:
-                generate_incident_docx(int(incident_id),path)
-                QMessageBox.information(self,"Report Created","Professional Word investigation report created successfully.")
+                generate_incident_docx(int(incident_id), path)
+                self.show_export_success(path)
             except Exception as e:
                 logging.exception("Incident report failed")
-                QMessageBox.critical(self,"Report Error",str(e))
-        b.clicked.connect(generate); layout.addWidget(incident_box)
+                QMessageBox.critical(self, "Report Error", str(e))
+
+        b.clicked.connect(generate)
+        layout.addWidget(incident_box)
+        layout.addStretch(1)
+
+    def show_export_success(self, path):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Export Complete")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText("Report created successfully.")
+        msg.setInformativeText(str(path))
+        open_button = msg.addButton("Open Folder", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton("OK", QMessageBox.ButtonRole.AcceptRole)
+        msg.exec()
+        if msg.clickedButton() == open_button:
+            self.open_path(Path(path).parent)
+
+    def open_path(self, path):
+        try:
+            path = Path(path)
+            if sys.platform.startswith("win"):
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                os.system(f'open "{path}"')
+            else:
+                os.system(f'xdg-open "{path}"')
+        except Exception as e:
+            logging.exception("Unable to open path")
+            QMessageBox.warning(self, "Open Folder", f"Unable to open folder.\n\n{e}")
+
+    def open_reports_folder(self):
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        self.open_path(REPORT_DIR)
+
+    def _export_path(self, filename, title, file_filter):
+        REPORT_DIR.mkdir(parents=True, exist_ok=True)
+        return QFileDialog.getSaveFileName(self, title, str(REPORT_DIR / filename), file_filter)[0]
 
     @staticmethod
     def table_data_static(table_name):
-        allowed={"observations","incidents","audits","capa"}
-        if table_name not in allowed: raise ValueError("Invalid report table.")
-        rows=db.fetchall(f"SELECT * FROM {table_name} ORDER BY id DESC")
-        if not rows:return [],[]
-        columns=list(rows[0].keys())
+        allowed = {"observations", "incidents", "audits", "capa"}
+        if table_name not in allowed:
+            raise ValueError("Invalid report table.")
+        rows = db.fetchall(f"SELECT * FROM {table_name} ORDER BY id DESC")
+        if not rows:
+            return [], []
+        columns = list(rows[0].keys())
         return columns, [[safe(row[c]) for c in columns] for row in rows]
 
     def table_data(self, table_name):
         return self.table_data_static(table_name)
 
     def export_csv(self, table_name):
-        columns,data=self.table_data(table_name)
-        if not columns:
-            QMessageBox.information(self,"No Data","There is no data to export."); return
-        path,_=QFileDialog.getSaveFileName(self,"Save CSV",f"{table_name}_report.csv","CSV (*.csv)")
-        if not path:return
-        with open(path,"w",newline="",encoding="utf-8-sig") as f:
-            writer=csv.writer(f); writer.writerow(columns); writer.writerows(data)
-        QMessageBox.information(self,"Export Complete","CSV report created successfully.")
+        try:
+            columns, data = self.table_data(table_name)
+            if not columns:
+                QMessageBox.information(self, "No Data", "There is no data to export.")
+                return
+            path = self._export_path(f"{table_name}_report.csv", "Download CSV Report", "CSV Files (*.csv)")
+            if not path:
+                return
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f); writer.writerow(columns); writer.writerows(data)
+            self.show_export_success(path)
+        except Exception as e:
+            logging.exception("CSV export failed")
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def export_excel(self, table_name):
-        columns,data=self.table_data(table_name)
-        if not columns:
-            QMessageBox.information(self,"No Data","There is no data to export."); return
-        path,_=QFileDialog.getSaveFileName(self,"Save Excel",f"{table_name}_report.xlsx","Excel (*.xlsx)")
-        if not path:return
-        wb=Workbook(); ws=wb.active; ws.title=table_name[:31]; ws.append(columns)
-        for row in data: ws.append(row)
-        for cell in ws[1]:
-            font=copy(cell.font); font.bold=True; cell.font=font
-        ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions; wb.save(path)
-        QMessageBox.information(self,"Export Complete","Excel report created successfully.")
+        try:
+            columns, data = self.table_data(table_name)
+            if not columns:
+                QMessageBox.information(self, "No Data", "There is no data to export.")
+                return
+            path = self._export_path(f"{table_name}_report.xlsx", "Download Excel Report", "Excel Files (*.xlsx)")
+            if not path:
+                return
+            wb = Workbook(); ws = wb.active; ws.title = table_name[:31]; ws.append(columns)
+            for row in data: ws.append(row)
+            for cell in ws[1]:
+                font = copy(cell.font); font.bold = True; cell.font = font
+            ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
+            wb.save(path)
+            self.show_export_success(path)
+        except Exception as e:
+            logging.exception("Excel export failed")
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def export_pdf(self, table_name):
-        columns,data=self.table_data(table_name)
-        if not columns:
-            QMessageBox.information(self,"No Data","There is no data to export."); return
-        path,_=QFileDialog.getSaveFileName(self,"Save PDF",f"{table_name}_report.pdf","PDF (*.pdf)")
-        if not path:return
-        styles=getSampleStyleSheet()
-        doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=20,leftMargin=20,topMargin=25,bottomMargin=25)
-        story=[]
-        logo=db.setting("company_logo","")
-        if logo and Path(logo).exists():
-            try:
-                from reportlab.platypus import Image
-                img=Image(logo,width=70,height=70); story.append(img)
-            except Exception: pass
-        story.append(Paragraph(company_name(),styles["Title"]))
-        project=db.setting("project_name","")
-        if project: story.append(Paragraph(project,styles["Heading2"]))
-        doc_no=db.setting("document_prefix","HSE")
-        story.append(Paragraph(f"{table_name.title()} Report | Document Prefix: {doc_no}",styles["Heading2"]))
-        story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",styles["Normal"]))
-        story.append(Spacer(1,12))
-        max_columns=min(len(columns),10); pdf_data=[columns[:max_columns]]+[r[:max_columns] for r in data[:500]]
-        t=Table(pdf_data,repeatRows=1)
-        t.setStyle(TableStyle([
-            ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),
-            ("TEXTCOLOR",(0,0),(-1,0),colors.white),
-            ("GRID",(0,0),(-1,-1),0.4,colors.grey),
-            ("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP")
-        ]))
-        story.append(t)
-        footer=db.setting("report_footer","")
-        if footer: story.extend([Spacer(1,10),Paragraph(footer,styles["Normal"])])
-        doc.build(story)
-        QMessageBox.information(self,"Export Complete","PDF report created successfully.")
+        try:
+            columns, data = self.table_data(table_name)
+            if not columns:
+                QMessageBox.information(self, "No Data", "There is no data to export.")
+                return
+            path = self._export_path(f"{table_name}_report.pdf", "Download PDF Report", "PDF Files (*.pdf)")
+            if not path:
+                return
+            styles = getSampleStyleSheet()
+            doc = SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=25, bottomMargin=25)
+            story = []
+            logo_path = db.setting("company_logo", "")
+            if logo_path and Path(logo_path).exists():
+                try:
+                    from reportlab.platypus import Image
+                    story.append(Image(logo_path, width=70, height=70))
+                except Exception:
+                    pass
+            story.append(Paragraph(company_name(), styles["Title"]))
+            project = db.setting("project_name", "")
+            if project: story.append(Paragraph(project, styles["Heading2"]))
+            prefix = db.setting("document_prefix", "HSE")
+            story.append(Paragraph(f"{table_name.title()} Report | Document Prefix: {prefix}", styles["Heading2"]))
+            story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
+            story.append(Spacer(1, 12))
+            max_columns = min(len(columns), 10)
+            pdf_data = [columns[:max_columns]] + [r[:max_columns] for r in data[:500]]
+            t = Table(pdf_data, repeatRows=1)
+            t.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17365D")),
+                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                ("GRID", (0,0), (-1,-1), 0.4, colors.grey),
+                ("FONTSIZE", (0,0), (-1,-1), 6),
+                ("VALIGN", (0,0), (-1,-1), "TOP")
+            ]))
+            story.append(t)
+            footer = db.setting("report_footer", "")
+            if footer: story.extend([Spacer(1,10), Paragraph(footer, styles["Normal"])])
+            doc.build(story)
+            self.show_export_success(path)
+        except Exception as e:
+            logging.exception("PDF export failed")
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def export_docx(self, table_name):
-        columns,data=self.table_data(table_name)
-        if not columns:
-            QMessageBox.information(self,"No Data","There is no data to export."); return
-        path,_=QFileDialog.getSaveFileName(self,"Save Word Report",f"{table_name}_report.docx","Word Document (*.docx)")
-        if not path:return
         try:
-            generate_table_docx(table_name,path)
-            QMessageBox.information(self,"Export Complete","Word report created successfully.")
+            columns, data = self.table_data(table_name)
+            if not columns:
+                QMessageBox.information(self, "No Data", "There is no data to export.")
+                return
+            path = self._export_path(f"{table_name}_report.docx", "Download Word Report", "Word Documents (*.docx)")
+            if not path:
+                return
+            generate_table_docx(table_name, path)
+            self.show_export_success(path)
         except Exception as e:
             logging.exception("Word report failed")
-            QMessageBox.critical(self,"Export Error",str(e))
-
+            QMessageBox.critical(self, "Export Error", str(e))
 
     def export_table(
         self,
