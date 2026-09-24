@@ -7,7 +7,7 @@ binaries = []
 hiddenimports = []
 
 for package in ["PySide6", "reportlab", "openpyxl", "PIL"]:
-    try:
+    try:z
         d, b, h = collect_all(package)
         datas += d
         binaries += b
