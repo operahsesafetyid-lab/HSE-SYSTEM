@@ -28,6 +28,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet
 from openpyxl import Workbook
+from openpyxl.styles import Alignment
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -37,7 +38,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -290,6 +291,11 @@ class Database:
         self.conn.execute("CREATE TABLE IF NOT EXISTS incident_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(incident_id) REFERENCES incidents(id) ON DELETE CASCADE)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS audit_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS capa_attachments (id INTEGER PRIMARY KEY AUTOINCREMENT, capa_id INTEGER NOT NULL, file_path TEXT, attachment_type TEXT DEFAULT 'Evidence', FOREIGN KEY(capa_id) REFERENCES capa(id) ON DELETE CASCADE)")
+        # Newer incident-investigation procedure data is stored as JSON so existing
+        # installations keep all original columns/features without a destructive migration.
+        incident_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(incidents)").fetchall()}
+        if "investigation_details" not in incident_cols:
+            self.conn.execute("ALTER TABLE incidents ADD COLUMN investigation_details TEXT DEFAULT ''")
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -486,6 +492,25 @@ def safe(value):
     return "" if value is None else str(value)
 
 
+def xml_safe(value):
+    """Remove characters that are illegal in XML/Office Open XML files."""
+    text = safe(value)
+    return "".join(ch for ch in text if ch in "\t\n\r" or ord(ch) >= 32)
+
+
+def attachment_names(table_name, record_id):
+    return "; ".join(Path(safe(r["file_path"])).name for r in attachment_rows(table_name, record_id))
+
+
+def attachment_export_map(table_name):
+    return {
+        "observations": "observation_attachments",
+        "incidents": "incident_attachments",
+        "audits": "audit_attachments",
+        "capa": "capa_attachments",
+    }.get(table_name)
+
+
 def overdue(target, status):
     if not target or status in ("Closed", "Cancelled"):
         return False
@@ -666,7 +691,7 @@ def add_docx_header(document):
             run.add_picture(logo, width=Inches(1.15))
         except Exception:
             pass
-    run = p.add_run(company_name())
+    run = p.add_run(xml_safe(company_name()))
     run.bold = True
     run.font.size = Pt(14)
 
@@ -677,29 +702,45 @@ def add_docx_footer(document):
         return
     p = document.sections[0].footer.paragraphs[0]
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.add_run(footer_text).font.size = Pt(8)
+    p.add_run(xml_safe(footer_text)).font.size = Pt(8)
 
 
 def add_docx_title(document, title, number=""):
     p = document.add_paragraph()
     p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run(title)
+    r = p.add_run(xml_safe(title))
     r.bold = True
     r.font.size = Pt(18)
     if number:
         p2 = document.add_paragraph()
         p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        r2 = p2.add_run(f"Document No.: {number}")
+        r2 = p2.add_run(xml_safe(f"Document No.: {number}"))
         r2.bold = True
         r2.font.size = Pt(10)
+
+def save_docx_validated(document, path):
+    """Write a Word report atomically and validate the OOXML ZIP before replacing the target."""
+    target=Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp=target.with_name(target.name + ".tmp.docx")
+    try:
+        document.save(str(temp))
+        with zipfile.ZipFile(temp, "r") as z:
+            bad=z.testzip()
+            if bad:
+                raise ValueError(f"Generated Word report is corrupt: {bad}")
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+
 
 
 def add_docx_kv_table(document, pairs):
     table = document.add_table(rows=0, cols=2)
     for key, value in pairs:
         cells = table.add_row().cells
-        cells[0].text = safe(key)
-        cells[1].text = safe(value)
+        cells[0].text = xml_safe(key)
+        cells[1].text = xml_safe(value)
         cells[0].paragraphs[0].runs[0].bold = True
     style_docx_table(table, header=False)
     return table
@@ -710,16 +751,26 @@ def add_docx_attachments(document, rows):
     if not rows:
         document.add_paragraph("No attachments recorded.")
         return
-    table = document.add_table(rows=1, cols=3)
+    table = document.add_table(rows=1, cols=4)
     hdr = table.rows[0].cells
     hdr[0].text = "No."
     hdr[1].text = "File"
     hdr[2].text = "Type"
+    hdr[3].text = "Stored Location"
     for i, row in enumerate(rows, 1):
         cells = table.add_row().cells
+        path = Path(safe(row["file_path"]))
         cells[0].text = str(i)
-        cells[1].text = Path(safe(row["file_path"])).name
-        cells[2].text = safe(row["attachment_type"])
+        cells[1].text = path.name
+        cells[2].text = xml_safe(row["attachment_type"])
+        cells[3].text = xml_safe(str(path))
+        try:
+            if path.exists():
+                run = cells[1].paragraphs[0].add_run()
+                run.add_break()
+                run.add_text("File is available in the HSE attachments folder.")
+        except Exception:
+            pass
     style_docx_table(table)
 
 
@@ -744,56 +795,62 @@ def generate_incident_docx(incident_id, path):
     add_docx_title(doc, "ACCIDENT / INCIDENT INVESTIGATION REPORT", row["number"])
 
     add_docx_kv_table(doc, [
-        ("Company", company_name()),
-        ("Project", row["project"]),
-        ("Incident Date", row["incident_date"]),
-        ("Incident Time", row["incident_time"]),
-        ("Location", row["location"]),
-        ("Department", row["department"]),
-        ("Activity", row["activity"]),
-        ("Incident Type", row["incident_type"]),
-        ("Person Involved", row["person_involved"]),
-        ("Employee ID", row["employee_id"]),
-        ("Designation", row["designation"]),
-        ("Supervisor", row["supervisor"]),
-        ("Witnesses", row["witnesses"]),
-        ("Equipment", row["equipment"]),
+        ("Company", company_name()), ("Project", row["project"]),
+        ("Incident Date", row["incident_date"]), ("Incident Time", row["incident_time"]),
+        ("Location", row["location"]), ("Department", row["department"]),
+        ("Activity", row["activity"]), ("Incident Type", row["incident_type"]),
+        ("Person Involved", row["person_involved"]), ("Employee ID", row["employee_id"]),
+        ("Designation", row["designation"]), ("Supervisor", row["supervisor"]),
+        ("Witnesses", row["witnesses"]), ("Equipment", row["equipment"]),
         ("Investigation Method", row["investigation_method"]),
     ])
 
+    details = {}
+    try:
+        details = json.loads(safe(row["investigation_details"]) or "{}")
+    except Exception:
+        details = {}
+
     sections = [
-        ("Incident Description", row["description"]),
-        ("Immediate Action", row["immediate_action"]),
-        ("Actual Consequences", row["consequences"]),
-        ("Potential Consequences", row["potential_consequences"]),
-        ("Direct Cause", row["direct_cause"]),
-        ("Contributing Factors", row["contributing_factors"]),
-        ("Root Cause", row["root_cause"]),
-        ("Corrective Action", row["corrective_action"]),
+        ("Investigation Procedure / Method Details", details.get("summary", "")),
+        ("Incident Description", row["description"]), ("Immediate Action", row["immediate_action"]),
+        ("Actual Consequences", row["consequences"]), ("Potential Consequences", row["potential_consequences"]),
+    ]
+    for key, value in details.items():
+        if key != "summary" and value:
+            sections.append((key.replace("_", " ").title(), value))
+    sections += [
+        ("Direct Cause", row["direct_cause"]), ("Contributing Factors", row["contributing_factors"]),
+        ("Root Cause", row["root_cause"]), ("Corrective Action", row["corrective_action"]),
         ("Preventive Action", row["preventive_action"]),
     ]
+    seen=set()
     for heading, value in sections:
-        doc.add_heading(heading, level=2)
-        doc.add_paragraph(safe(value) or "N/A")
+        if heading in seen:
+            continue
+        seen.add(heading)
+        doc.add_heading(xml_safe(heading), level=2)
+        doc.add_paragraph(xml_safe(value) or "N/A")
 
-    doc.add_heading("5 Why Analysis", level=2)
-    why_table = doc.add_table(rows=1, cols=2)
-    why_table.rows[0].cells[0].text = "Step"
-    why_table.rows[0].cells[1].text = "Analysis"
-    for i in range(1, 6):
-        cells = why_table.add_row().cells
-        cells[0].text = f"Why {i}"
-        cells[1].text = safe(row[f"why{i}"]) or "N/A"
-    style_docx_table(why_table)
+    if row["investigation_method"] == "5 Why Analysis" or any(row[f"why{i}"] for i in range(1,6)):
+        doc.add_heading("5 Why Analysis", level=2)
+        why_table = doc.add_table(rows=1, cols=2)
+        why_table.rows[0].cells[0].text = "Step"
+        why_table.rows[0].cells[1].text = "Analysis"
+        for i in range(1, 6):
+            cells = why_table.add_row().cells
+            cells[0].text = f"Why {i}"
+            cells[1].text = xml_safe(row[f"why{i}"]) or "N/A"
+        style_docx_table(why_table)
 
     add_docx_attachments(doc, attachment_rows("incident_attachments", incident_id))
     add_docx_signatures(doc)
     add_docx_footer(doc)
-    doc.save(path)
+    save_docx_validated(doc, path)
 
 
-def generate_table_docx(table_name, path):
-    columns, data = MainWindow.table_data_static(table_name)
+def generate_table_docx(table_name, path, record_ids=None):
+    columns, data = MainWindow.table_data_static(table_name, record_ids=record_ids)
     if not columns:
         raise ValueError("There is no data to export.")
     doc = Document()
@@ -803,14 +860,14 @@ def generate_table_docx(table_name, path):
     p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     table = doc.add_table(rows=1, cols=len(columns))
     for i, col in enumerate(columns):
-        table.rows[0].cells[i].text = str(col)
+        table.rows[0].cells[i].text = xml_safe(col)
     for row in data[:1000]:
         cells = table.add_row().cells
         for i, value in enumerate(row):
-            cells[i].text = safe(value)
+            cells[i].text = xml_safe(value)
     style_docx_table(table)
     add_docx_footer(doc)
-    doc.save(path)
+    save_docx_validated(doc, path)
 
 
 class PieChartWidget(QWidget):
@@ -1325,229 +1382,124 @@ class MainWindow(QMainWindow):
 
     def incidents(self):
         w, layout = self.page("Accident / Incident Investigation")
-        banner = QHBoxLayout()
-        logo = QLabel(); logo.setFixedSize(80, 60); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo_path = db.setting("company_logo", "")
+        banner=QHBoxLayout(); logo=QLabel(); logo.setFixedSize(80,60); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_path=db.setting("company_logo","")
         if logo_path and Path(logo_path).exists():
-            logo.setPixmap(QPixmap(logo_path).scaled(70, 55, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        banner.addWidget(logo)
-        banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"), 1)
-        layout.addLayout(banner)
-        toolbar = QHBoxLayout()
-        add_button = QPushButton("+ New Incident")
-        report_button = QPushButton("Generate Word Report")
-        toolbar.addWidget(add_button); toolbar.addWidget(report_button)
+            logo.setPixmap(QPixmap(logo_path).scaled(70,55,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
+        banner.addWidget(logo); banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"),1); layout.addLayout(banner)
+        toolbar=QHBoxLayout()
+        buttons=[("+ New Incident", None),("Delete Selected",None),("Export CSV",lambda:self.export_csv("incidents")),( "Export Excel",lambda:self.export_excel("incidents")),( "Export PDF",lambda:self.export_pdf("incidents")),( "Export Word",lambda:self.export_docx("incidents")),( "Professional Report",None)]
+        btns={}
+        for text,fn in buttons:
+            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
+            if fn:b.clicked.connect(fn)
         layout.addLayout(toolbar)
-
-        table = QTableWidget()
-        headers = ["ID","Number","Date","Type","Location","Project","Method","Status","Attachments"]
-        table.setColumnCount(len(headers))
-        table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(table)
-
+        table=QTableWidget(); headers=["ID","Number","Date","Type","Location","Project","Method","Status","Attachments"]
+        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
         def load():
-            rows = db.fetchall("SELECT * FROM incidents ORDER BY id DESC")
-            table.setRowCount(len(rows))
-            for r, row in enumerate(rows):
-                count = db.fetchone("SELECT COUNT(*) c FROM incident_attachments WHERE incident_id=?", (row["id"],))["c"]
-                values = [row["id"], row["number"], row["incident_date"], row["incident_type"],
-                          row["location"], row["project"], row["investigation_method"],
-                          row["status"], count]
-                for c, value in enumerate(values):
-                    table.setItem(r, c, QTableWidgetItem(safe(value)))
-
-        def generate_selected():
-            r = table.currentRow()
-            if r < 0:
-                QMessageBox.warning(self, "Word Report", "Select an investigation first."); return
-            incident_id = int(table.item(r,0).text())
-            number = table.item(r,1).text()
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Investigation Report", f"{number}_Investigation_Report.docx",
-                "Word Document (*.docx)"
-            )
-            if not path: return
-            try:
-                generate_incident_docx(incident_id, path)
-                QMessageBox.information(self, "Report Created", "Professional Word investigation report created successfully.")
-            except Exception as e:
-                logging.exception("Incident Word report failed")
-                QMessageBox.critical(self, "Report Error", str(e))
-
-        add_button.clicked.connect(lambda: self.incident_form(load))
-        report_button.clicked.connect(generate_selected)
+            rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC"); table.setRowCount(len(rows))
+            for r,row in enumerate(rows):
+                count=db.fetchone("SELECT COUNT(*) c FROM incident_attachments WHERE incident_id=?",(row["id"],))["c"]
+                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],count]
+                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
+        def professional():
+            incident_id=self.selected_id(table,"Professional Report")
+            if incident_id is None:return
+            number=table.item(table.currentRow(),1).text(); path,_=QFileDialog.getSaveFileName(self,"Save Investigation Report",f"{number}_Investigation_Report.docx","Word Document (*.docx)")
+            if not path:return
+            try: generate_incident_docx(incident_id,path); self.show_export_success(path)
+            except Exception as e: logging.exception("Incident Word report failed"); QMessageBox.critical(self,"Report Error",str(e))
+        btns["+ New Incident"].clicked.connect(lambda:self.incident_form(load))
+        btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"incidents","incident_attachments","Incident",load))
+        btns["Professional Report"].clicked.connect(professional)
         load()
-
 
 
     def incident_form(self, refresh):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("New Accident / Incident Investigation")
-        dialog.resize(1000, 900)
-        dialog.setMinimumSize(920, 760)
-        outer = QVBoxLayout(dialog)
-
-        title = QLabel("ACCIDENT / INCIDENT INVESTIGATION")
-        title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
-        outer.addWidget(title)
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        content = QWidget()
-        form = QFormLayout(content)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        edits = {}
-
+        dialog=QDialog(self); dialog.setWindowTitle("New Accident / Incident Investigation"); dialog.resize(1000,900); dialog.setMinimumSize(920,760); outer=QVBoxLayout(dialog)
+        title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
+        scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
         def add_edit(name):
-            e = QLineEdit(); edits[name] = e
-            form.addRow(name.replace("_", " ").title() + ":", e)
-            return e
+            e=QLineEdit(); edits[name]=e; form.addRow(name.replace("_"," ").title()+":",e); return e
+        for name in ["incident_time","location","project","company","department","activity","person_involved","employee_id","designation","supervisor","witnesses","equipment"]:add_edit(name)
+        incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); form.addRow("Type of Incident:",incident_type)
+        description=QTextEdit(); description.setMinimumHeight(110); form.addRow("Incident Description:",description)
+        immediate=QTextEdit(); immediate.setMinimumHeight(80); form.addRow("Immediate Action:",immediate)
+        consequences=QTextEdit(); consequences.setMinimumHeight(80); form.addRow("Actual Consequences:",consequences)
+        potential=QTextEdit(); potential.setMinimumHeight(80); form.addRow("Potential Consequences:",potential)
+        method=QComboBox(); method.addItems(INVESTIGATION_METHODS); form.addRow("Investigation Method:",method)
 
-        for name in ["incident_time", "location", "project", "company", "department", "activity",
-                     "person_involved", "employee_id", "designation", "supervisor", "witnesses", "equipment"]:
-            add_edit(name)
+        procedure_box=QGroupBox("Investigation Procedure"); procedure_layout=QVBoxLayout(procedure_box); procedure_form=QFormLayout(); procedure_layout.addLayout(procedure_form); form.addRow(procedure_box)
+        proc_widgets=[]
+        def clear_proc():
+            while procedure_form.count():
+                item=procedure_form.takeAt(0); w=item.widget()
+                if w:w.deleteLater()
+            proc_widgets.clear()
+        def add_proc(label, name, multi=True):
+            w=QTextEdit() if multi else QLineEdit();
+            if multi:w.setMinimumHeight(70)
+            proc_widgets.append((name,w)); procedure_form.addRow(label+":",w); return w
+        def build_proc(_=None):
+            clear_proc(); m=method.currentText()
+            if m=="ICAM":
+                add_proc("Timeline / Event Sequence","timeline"); add_proc("Failed or Missing Defenses / Barriers","failed_defenses"); add_proc("Immediate Causes","immediate_causes"); add_proc("Contributing Conditions","contributing_conditions"); add_proc("Organizational Factors","organizational_factors"); add_proc("Root Cause","root_cause_analysis")
+            elif m=="5 Why Analysis":
+                for i in range(1,6): add_proc(f"Why {i}",f"why{i}",multi=False)
+            elif m=="Fishbone / Ishikawa":
+                add_proc("People / Man","people"); add_proc("Machine / Equipment","machine"); add_proc("Method","method"); add_proc("Material","material"); add_proc("Environment","environment"); add_proc("Management / Measurement","management")
+            elif m=="Barrier Analysis":
+                add_proc("Hazard / Threat","hazard"); add_proc("Top Event","top_event"); add_proc("Required Barriers","required_barriers"); add_proc("Failed / Missing Barriers","failed_barriers"); add_proc("Recovery / Mitigation","mitigation")
+            elif m=="Bow-Tie Analysis":
+                add_proc("Threats","threats"); add_proc("Top Event","top_event"); add_proc("Preventive Barriers","preventive_barriers"); add_proc("Consequences","consequences"); add_proc("Mitigative Barriers","mitigative_barriers")
+            elif m=="Fault Tree Analysis":
+                add_proc("Top Event","top_event"); add_proc("Intermediate Events","intermediate_events"); add_proc("Basic Events","basic_events"); add_proc("Logic / Gate Analysis","logic_analysis")
+            elif m=="Causal Tree":
+                add_proc("Event","event"); add_proc("Causal Sequence","causal_sequence"); add_proc("Direct Causes","direct_causes"); add_proc("Contributing Causes","contributing_causes"); add_proc("Root Causes","root_causes")
+            else:
+                add_proc("Investigation Procedure / Notes","summary")
+        method.currentTextChanged.connect(build_proc); build_proc()
 
-        incident_type = QComboBox(); incident_type.addItems(INCIDENT_TYPES)
-        form.addRow("Type of Incident:", incident_type)
-
-        description = QTextEdit(); description.setMinimumHeight(110)
-        form.addRow("Incident Description:", description)
-        immediate = QTextEdit(); immediate.setMinimumHeight(80)
-        form.addRow("Immediate Action:", immediate)
-        consequences = QTextEdit(); consequences.setMinimumHeight(80)
-        form.addRow("Actual Consequences:", consequences)
-        potential = QTextEdit(); potential.setMinimumHeight(80)
-        form.addRow("Potential Consequences:", potential)
-
-        method = QComboBox(); method.addItems(INVESTIGATION_METHODS)
-        form.addRow("Investigation Method:", method)
-
-        whys = []
-        for i in range(1, 6):
-            e = QLineEdit(); whys.append(e)
-            form.addRow(f"Why {i}:", e)
-
-        direct = QTextEdit(); direct.setMinimumHeight(80)
-        form.addRow("Direct Cause:", direct)
-        contributing = QTextEdit(); contributing.setMinimumHeight(80)
-        form.addRow("Contributing Factors:", contributing)
-        root = QTextEdit(); root.setMinimumHeight(80)
-        form.addRow("Root Cause:", root)
-        corrective = QTextEdit(); corrective.setMinimumHeight(80)
-        form.addRow("Corrective Action:", corrective)
-        preventive = QTextEdit(); preventive.setMinimumHeight(80)
-        form.addRow("Preventive Action:", preventive)
-
-        attachment_paths = []
-        attachment_label = QLabel("No evidence files selected.")
-        attachment_label.setWordWrap(True)
-        attach_button = QPushButton("Attach Evidence Files")
-        attach_button.setMinimumHeight(36)
-
+        direct=QTextEdit(); direct.setMinimumHeight(80); form.addRow("Direct Cause:",direct)
+        contributing=QTextEdit(); contributing.setMinimumHeight(80); form.addRow("Contributing Factors:",contributing)
+        root=QTextEdit(); root.setMinimumHeight(80); form.addRow("Root Cause:",root)
+        corrective=QTextEdit(); corrective.setMinimumHeight(80); form.addRow("Corrective Action:",corrective)
+        preventive=QTextEdit(); preventive.setMinimumHeight(80); form.addRow("Preventive Action:",preventive)
+        attachment_paths=[]; attachment_label=QLabel("No evidence files selected."); attachment_label.setWordWrap(True); attach_button=QPushButton("Attach Evidence Files"); attach_button.setMinimumHeight(36)
         def choose_files():
-            paths, _ = QFileDialog.getOpenFileNames(
-                dialog, "Select Investigation Evidence", "",
-                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
-            )
-            if paths:
-                attachment_paths.clear(); attachment_paths.extend(paths)
-                attachment_label.setText("\n".join(Path(p).name for p in paths))
-
-        attach_button.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments:", attach_button)
-        form.addRow("Selected Files:", attachment_label)
-
-        scroll_area.setWidget(content)
-        outer.addWidget(scroll_area, 1)
-
-        buttons = QDialogButtonBox()
-        save_button = buttons.addButton("Save Investigation", QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-        save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40)
-        outer.addWidget(buttons)
-        cancel_button.clicked.connect(dialog.reject)
-
+            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Investigation Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            if paths: attachment_paths.clear(); attachment_paths.extend(paths); attachment_label.setText("\n".join(Path(p).name for p in paths))
+        attach_button.clicked.connect(choose_files); form.addRow("Evidence / Attachments:",attach_button); form.addRow("Selected Files:",attachment_label)
+        scroll.setWidget(content); outer.addWidget(scroll,1)
+        buttons=QDialogButtonBox(); save_button=buttons.addButton("Save Investigation",QDialogButtonBox.ButtonRole.AcceptRole); cancel_button=buttons.addButton("Cancel",QDialogButtonBox.ButtonRole.RejectRole); save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40); outer.addWidget(buttons); cancel_button.clicked.connect(dialog.reject)
         def save():
-            if not edits["location"].text().strip():
-                QMessageBox.warning(dialog, "Required", "Location is required.")
-                return
+            if not edits["location"].text().strip(): QMessageBox.warning(dialog,"Required","Location is required."); return
             try:
-                number = next_number("HSE-INC", "incidents")
-                db.execute("""
-                    INSERT INTO incidents (
-                        number, incident_date, incident_time, location, project, company, department,
-                        activity, incident_type, person_involved, employee_id, designation, supervisor,
-                        witnesses, description, immediate_action, consequences, potential_consequences,
-                        equipment, investigation_method, why1, why2, why3, why4, why5,
-                        direct_cause, contributing_factors, root_cause, corrective_action,
-                        preventive_action, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    number, today(), edits["incident_time"].text(), edits["location"].text(),
-                    edits["project"].text(), edits["company"].text(), edits["department"].text(),
-                    edits["activity"].text(), incident_type.currentText(), edits["person_involved"].text(),
-                    edits["employee_id"].text(), edits["designation"].text(), edits["supervisor"].text(),
-                    edits["witnesses"].text(), description.toPlainText(), immediate.toPlainText(),
-                    consequences.toPlainText(), potential.toPlainText(), edits["equipment"].text(),
-                    method.currentText(), *[x.text() for x in whys], direct.toPlainText(),
-                    contributing.toPlainText(), root.toPlainText(), corrective.toPlainText(),
-                    preventive.toPlainText(), datetime.now().isoformat()
-                ))
-                row = db.fetchone("SELECT id FROM incidents WHERE number=?", (number,))
-                if row and attachment_paths:
-                    copy_attachments(attachment_paths, number, "incident_attachments", row["id"])
-                dialog.accept()
-                refresh()
-            except Exception as e:
-                logging.exception("Incident save failed")
-                QMessageBox.critical(dialog, "Save Error", f"Unable to save investigation.\n\n{e}")
-
-        save_button.clicked.connect(save)
-        dialog.exec()
+                number=next_number("HSE-INC","incidents")
+                proc={name:(w.toPlainText() if isinstance(w,QTextEdit) else w.text()) for name,w in proc_widgets}
+                proc["summary"]=f"{method.currentText()} procedure captured in the investigation form."
+                whys=[proc.get(f"why{i}","") for i in range(1,6)]
+                # Preserve existing report fields while also saving the method-specific procedure.
+                db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),edits["person_involved"].text(),edits["employee_id"].text(),edits["designation"].text(),edits["supervisor"].text(),edits["witnesses"].text(),description.toPlainText(),immediate.toPlainText(),consequences.toPlainText(),potential.toPlainText(),edits["equipment"].text(),method.currentText(),*whys,direct.toPlainText(),contributing.toPlainText(),root.toPlainText(),corrective.toPlainText(),preventive.toPlainText(),json.dumps(proc,ensure_ascii=False),datetime.now().isoformat()))
+                row=db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))
+                if row and attachment_paths: copy_attachments(attachment_paths,number,"incident_attachments",row["id"])
+                dialog.accept(); refresh()
+            except Exception as e: logging.exception("Incident save failed"); QMessageBox.critical(dialog,"Save Error",f"Unable to save investigation.\n\n{e}")
+        save_button.clicked.connect(save); dialog.exec()
 
     def audits(self):
-        w, layout = self.page("Audit Register")
-        toolbar=QHBoxLayout()
-        add_button=QPushButton("+ New Audit")
-        report_button=QPushButton("Export Word")
-        toolbar.addWidget(add_button); toolbar.addWidget(report_button)
+        w,layout=self.page("Audit Register")
+        toolbar=QHBoxLayout(); btns={}
+        for text in ["+ New Audit","Delete Selected","Export CSV","Export Excel","Export PDF","Export Word"]:
+            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
         layout.addLayout(toolbar)
-
-        table=QTableWidget()
-        headers=["ID","Number","Date","Standard","Audit Type","Project","Auditor","Status","Attachments"]
-        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(table)
-
+        table=QTableWidget(); headers=["ID","Number","Date","Standard","Audit Type","Project","Auditor","Status","Attachments"]; table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
         def load():
-            rows=db.fetchall("SELECT * FROM audits ORDER BY id DESC")
-            table.setRowCount(len(rows))
+            rows=db.fetchall("SELECT * FROM audits ORDER BY id DESC"); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
-                count=db.fetchone("SELECT COUNT(*) c FROM audit_attachments WHERE audit_id=?",(row["id"],))["c"]
-                vals=[row["id"],row["number"],row["audit_date"],row["standard"],row["audit_type"],
-                      row["project"],row["lead_auditor"],row["status"],count]
-                for c,v in enumerate(vals): table.setItem(r,c,QTableWidgetItem(safe(v)))
-
-        def export_selected():
-            r=table.currentRow()
-            if r<0: QMessageBox.warning(self,"Word Export","Select an audit first."); return
-            table_name="audits"
-            path,_=QFileDialog.getSaveFileName(self,"Save Audit Word Report","audit_report.docx","Word Document (*.docx)")
-            if not path:return
-            try:
-                generate_table_docx(table_name,path)
-                QMessageBox.information(self,"Export Complete","Word report created successfully.")
-            except Exception as e:
-                QMessageBox.critical(self,"Export Error",str(e))
-        add_button.clicked.connect(lambda:self.audit_form(load))
-        report_button.clicked.connect(export_selected)
-        load()
-
+                count=db.fetchone("SELECT COUNT(*) c FROM audit_attachments WHERE audit_id=?",(row["id"],))["c"]; vals=[row["id"],row["number"],row["audit_date"],row["standard"],row["audit_type"],row["project"],row["lead_auditor"],row["status"],count]
+                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
+        btns["+ New Audit"].clicked.connect(lambda:self.audit_form(load)); btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"audits","audit_attachments","Audit",load)); btns["Export CSV"].clicked.connect(lambda:self.export_csv("audits")); btns["Export Excel"].clicked.connect(lambda:self.export_excel("audits")); btns["Export PDF"].clicked.connect(lambda:self.export_pdf("audits")); btns["Export Word"].clicked.connect(lambda:self.export_docx("audits")); load()
 
 
     def audit_form(self, refresh):
@@ -1667,28 +1619,17 @@ class MainWindow(QMainWindow):
 
     def capa(self):
         w,layout=self.page("CAPA Register")
-        toolbar=QHBoxLayout(); add_button=QPushButton("+ New CAPA"); word_button=QPushButton("Export Word")
-        toolbar.addWidget(add_button); toolbar.addWidget(word_button); layout.addLayout(toolbar)
-        table=QTableWidget()
-        headers=["ID","Number","Source","Reference","Priority","Responsible","Target Date","Status","Overdue","Attachments"]
-        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        layout.addWidget(table)
+        toolbar=QHBoxLayout(); btns={}
+        for text in ["+ New CAPA","Delete Selected","Export CSV","Export Excel","Export PDF","Export Word"]:
+            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
+        layout.addLayout(toolbar)
+        table=QTableWidget(); headers=["ID","Number","Source","Reference","Priority","Responsible","Target Date","Status","Overdue","Attachments"]; table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
         def load():
             rows=db.fetchall("SELECT * FROM capa ORDER BY id DESC"); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
-                count=db.fetchone("SELECT COUNT(*) c FROM capa_attachments WHERE capa_id=?",(row["id"],))["c"]
-                vals=[row["id"],row["number"],row["source"],row["reference_number"],row["priority"],row["responsible"],
-                      row["target_date"],row["status"],"OVERDUE" if overdue(row["target_date"],row["status"]) else "",count]
-                for c,v in enumerate(vals): table.setItem(r,c,QTableWidgetItem(safe(v)))
-        def export_word():
-            path,_=QFileDialog.getSaveFileName(self,"Save CAPA Word Report","capa_report.docx","Word Document (*.docx)")
-            if not path:return
-            try: generate_table_docx("capa",path); QMessageBox.information(self,"Export Complete","Word report created successfully.")
-            except Exception as e: QMessageBox.critical(self,"Export Error",str(e))
-        add_button.clicked.connect(lambda:self.capa_form(load)); word_button.clicked.connect(export_word); load()
-
+                count=db.fetchone("SELECT COUNT(*) c FROM capa_attachments WHERE capa_id=?",(row["id"],))["c"]; vals=[row["id"],row["number"],row["source"],row["reference_number"],row["priority"],row["responsible"],row["target_date"],row["status"],"OVERDUE" if overdue(row["target_date"],row["status"]) else "",count]
+                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
+        btns["+ New CAPA"].clicked.connect(lambda:self.capa_form(load)); btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"capa","capa_attachments","CAPA",load)); btns["Export CSV"].clicked.connect(lambda:self.export_csv("capa")); btns["Export Excel"].clicked.connect(lambda:self.export_excel("capa")); btns["Export PDF"].clicked.connect(lambda:self.export_pdf("capa")); btns["Export Word"].clicked.connect(lambda:self.export_docx("capa")); load()
 
 
     def capa_form(self, refresh):
@@ -1875,178 +1816,189 @@ class MainWindow(QMainWindow):
         return QFileDialog.getSaveFileName(self, title, str(REPORT_DIR / filename), file_filter)[0]
 
     @staticmethod
-    def table_data_static(table_name):
+    def table_data_static(table_name, record_ids=None):
         allowed = {"observations", "incidents", "audits", "capa"}
         if table_name not in allowed:
             raise ValueError("Invalid report table.")
-        rows = db.fetchall(f"SELECT * FROM {table_name} ORDER BY id DESC")
+        params = []
+        where = ""
+        if record_ids:
+            placeholders = ",".join("?" for _ in record_ids)
+            where = f" WHERE id IN ({placeholders})"
+            params = list(record_ids)
+        rows = db.fetchall(f"SELECT * FROM {table_name}{where} ORDER BY id DESC", params)
         if not rows:
             return [], []
         columns = list(rows[0].keys())
-        return columns, [[safe(row[c]) for c in columns] for row in rows]
+        attach_table = attachment_export_map(table_name)
+        if attach_table and "Attachments" not in columns:
+            columns.append("Attachments")
+        data=[]
+        id_key="id"
+        for row in rows:
+            values=[xml_safe(row[c]) for c in columns if c != "Attachments"]
+            if attach_table:
+                values.append(xml_safe(attachment_names(attach_table, row[id_key])))
+            data.append(values)
+        return columns, data
 
-    def table_data(self, table_name):
-        return self.table_data_static(table_name)
+    def table_data(self, table_name, record_ids=None):
+        return self.table_data_static(table_name, record_ids=record_ids)
 
-    def export_csv(self, table_name):
+    def selected_id(self, table, title):
+        r=table.currentRow()
+        if r < 0 or not table.item(r,0):
+            QMessageBox.warning(self, title, "Select a record first.")
+            return None
+        return int(table.item(r,0).text())
+
+    def delete_selected_record(self, table, table_name, attachment_table, title, refresh):
+        record_id=self.selected_id(table, title)
+        if record_id is None:
+            return
+        record=db.fetchone(f"SELECT number FROM {table_name} WHERE id=?", (record_id,))
+        if not record:
+            return
+        if QMessageBox.question(self, "Confirm Delete", f"Delete {title.lower()} {record['number']} and its evidence?\n\nThis cannot be undone.") != QMessageBox.Yes:
+            return
+        for a in attachment_rows(attachment_table, record_id):
+            try: Path(safe(a["file_path"])).unlink(missing_ok=True)
+            except Exception: logging.exception("Unable to remove attachment")
+        db.execute(f"DELETE FROM {table_name} WHERE id=?", (record_id,))
+        refresh()
+
+    def export_csv(self, table_name, record_ids=None):
         try:
-            columns, data = self.table_data(table_name)
+            columns, data = self.table_data(table_name, record_ids)
             if not columns:
                 QMessageBox.information(self, "No Data", "There is no data to export.")
                 return
             path = self._export_path(f"{table_name}_report.csv", "Download CSV Report", "CSV Files (*.csv)")
-            if not path:
-                return
+            if not path: return
             with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                writer = csv.writer(f); writer.writerow(columns); writer.writerows(data)
+                writer=csv.writer(f); writer.writerow(columns); writer.writerows(data)
             self.show_export_success(path)
         except Exception as e:
-            logging.exception("CSV export failed")
-            QMessageBox.critical(self, "Export Error", str(e))
+            logging.exception("CSV export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
-    def export_excel(self, table_name):
+    def export_excel(self, table_name, record_ids=None):
         try:
-            columns, data = self.table_data(table_name)
+            columns, data = self.table_data(table_name, record_ids)
             if not columns:
-                QMessageBox.information(self, "No Data", "There is no data to export.")
-                return
-            path = self._export_path(f"{table_name}_report.xlsx", "Download Excel Report", "Excel Files (*.xlsx)")
-            if not path:
-                return
-            wb = Workbook(); ws = wb.active; ws.title = table_name[:31]; ws.append(columns)
-            for row in data: ws.append(row)
+                QMessageBox.information(self, "No Data", "There is no data to export."); return
+            path=self._export_path(f"{table_name}_report.xlsx","Download Excel Report","Excel Files (*.xlsx)")
+            if not path: return
+            wb=Workbook(); ws=wb.active; ws.title=table_name[:31]; ws.append(columns)
+            for row in data: ws.append([xml_safe(v) for v in row])
             for cell in ws[1]:
-                font = copy(cell.font); font.bold = True; cell.font = font
-            ws.freeze_panes = "A2"; ws.auto_filter.ref = ws.dimensions
-            wb.save(path)
+                cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True)
+            ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+            if "Attachments" in columns:
+                col=columns.index("Attachments")+1
+                for r in range(2, ws.max_row+1):
+                    ws.cell(r,col).alignment=Alignment(wrap_text=True, vertical="top")
+            for column_cells in ws.columns:
+                letter=column_cells[0].column_letter
+                max_len=min(55,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
+                ws.column_dimensions[letter].width=max(12,max_len)
+
+            # Include a dedicated attachment register in the Excel report so evidence is
+            # not lost when the main register has many columns.
+            attach_table=attachment_export_map(table_name)
+            if attach_table:
+                ids=[r["id"] for r in db.fetchall(f"SELECT id FROM {table_name} ORDER BY id DESC") if not record_ids or r["id"] in record_ids]
+                aws=wb.create_sheet("Attachments")
+                aws.append(["Record ID","Record Number","File Name","Attachment Type","Stored File Path"])
+                for rid in ids:
+                    rec=db.fetchone(f"SELECT number FROM {table_name} WHERE id=?",(rid,))
+                    for a in attachment_rows(attach_table,rid):
+                        fpath=safe(a["file_path"])
+                        aws.append([rid, safe(rec["number"]) if rec else "", Path(fpath).name, xml_safe(a["attachment_type"]), fpath])
+                        cell=aws.cell(aws.max_row,5)
+                        if fpath and Path(fpath).exists():
+                            cell.hyperlink=Path(fpath).as_uri()
+                            cell.style="Hyperlink"
+                aws.freeze_panes="A2"; aws.auto_filter.ref=aws.dimensions
+                for column_cells in aws.columns:
+                    letter=column_cells[0].column_letter
+                    max_len=min(80,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
+                    aws.column_dimensions[letter].width=max(12,max_len)
+            target=Path(path)
+            temp=target.with_name(target.name + ".tmp.xlsx")
+            try:
+                wb.save(temp)
+                with zipfile.ZipFile(temp, "r") as z:
+                    bad=z.testzip()
+                    if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
+                os.replace(temp,target)
+            finally:
+                temp.unlink(missing_ok=True)
             self.show_export_success(path)
         except Exception as e:
-            logging.exception("Excel export failed")
-            QMessageBox.critical(self, "Export Error", str(e))
+            logging.exception("Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
-    def export_pdf(self, table_name):
+    def export_pdf(self, table_name, record_ids=None):
         try:
-            columns, data = self.table_data(table_name)
+            columns,data=self.table_data(table_name, record_ids)
             if not columns:
-                QMessageBox.information(self, "No Data", "There is no data to export.")
-                return
-            path = self._export_path(f"{table_name}_report.pdf", "Download PDF Report", "PDF Files (*.pdf)")
-            if not path:
-                return
-            styles = getSampleStyleSheet()
-            doc = SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=20, leftMargin=20, topMargin=25, bottomMargin=25)
-            story = []
-            logo_path = db.setting("company_logo", "")
+                QMessageBox.information(self,"No Data","There is no data to export."); return
+            path=self._export_path(f"{table_name}_report.pdf","Download PDF Report","PDF Files (*.pdf)")
+            if not path:return
+            styles=getSampleStyleSheet()
+            doc=SimpleDocTemplate(path,pagesize=landscape(A4),rightMargin=20,leftMargin=20,topMargin=25,bottomMargin=25)
+            story=[]
+            logo_path=db.setting("company_logo","")
             if logo_path and Path(logo_path).exists():
                 try:
                     from reportlab.platypus import Image
-                    story.append(Image(logo_path, width=70, height=70))
-                except Exception:
-                    pass
-            story.append(Paragraph(company_name(), styles["Title"]))
-            project = db.setting("project_name", "")
-            if project: story.append(Paragraph(project, styles["Heading2"]))
-            prefix = db.setting("document_prefix", "HSE")
-            story.append(Paragraph(f"{table_name.title()} Report | Document Prefix: {prefix}", styles["Heading2"]))
-            story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
-            story.append(Spacer(1, 12))
-            max_columns = min(len(columns), 10)
-            pdf_data = [columns[:max_columns]] + [r[:max_columns] for r in data[:500]]
-            t = Table(pdf_data, repeatRows=1)
-            t.setStyle(TableStyle([
-                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17365D")),
-                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-                ("GRID", (0,0), (-1,-1), 0.4, colors.grey),
-                ("FONTSIZE", (0,0), (-1,-1), 6),
-                ("VALIGN", (0,0), (-1,-1), "TOP")
-            ]))
+                    story.append(Image(logo_path,width=70,height=70))
+                except Exception: pass
+            story += [Paragraph(xml_safe(company_name()),styles["Title"])]
+            project=db.setting("project_name","")
+            if project: story.append(Paragraph(xml_safe(project),styles["Heading2"]))
+            story.append(Paragraph(xml_safe(f"{table_name.title()} Report | Document Prefix: {document_prefix()}"),styles["Heading2"]))
+            story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",styles["Normal"]))
+            story.append(Spacer(1,12))
+            if len(columns) > 10 and "Attachments" in columns:
+                display_indices=list(range(9))+[columns.index("Attachments")]
+            else:
+                display_indices=list(range(min(len(columns),10)))
+            pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
+            t=Table(pdf_data,repeatRows=1); t.setStyle(TableStyle([
+                ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
+                ("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP")]))
             story.append(t)
-            footer = db.setting("report_footer", "")
-            if footer: story.extend([Spacer(1,10), Paragraph(footer, styles["Normal"])])
-            doc.build(story)
-            self.show_export_success(path)
+            footer=db.setting("report_footer","")
+            if footer: story.extend([Spacer(1,10),Paragraph(xml_safe(footer),styles["Normal"])])
+            doc.build(story); self.show_export_success(path)
         except Exception as e:
-            logging.exception("PDF export failed")
-            QMessageBox.critical(self, "Export Error", str(e))
+            logging.exception("PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
-    def export_docx(self, table_name):
+    def export_docx(self, table_name, record_ids=None):
         try:
-            columns, data = self.table_data(table_name)
+            columns,data=self.table_data(table_name, record_ids)
             if not columns:
-                QMessageBox.information(self, "No Data", "There is no data to export.")
-                return
-            path = self._export_path(f"{table_name}_report.docx", "Download Word Report", "Word Documents (*.docx)")
-            if not path:
-                return
-            generate_table_docx(table_name, path)
+                QMessageBox.information(self,"No Data","There is no data to export."); return
+            path=self._export_path(f"{table_name}_report.docx","Download Word Report","Word Documents (*.docx)")
+            if not path:return
+            generate_table_docx(table_name,path,record_ids=record_ids)
+            with zipfile.ZipFile(path,"r") as z: z.testzip()
             self.show_export_success(path)
         except Exception as e:
-            logging.exception("Word report failed")
-            QMessageBox.critical(self, "Export Error", str(e))
+            logging.exception("Word report failed"); QMessageBox.critical(self,"Export Error",str(e))
 
-    def export_table(
-        self,
-        table,
-        filename
-    ):
+    def export_table(self, table, filename):
+        self._export_table_widget_csv(table, filename)
 
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export CSV",
-            f"{filename}.csv",
-            "CSV (*.csv)"
-        )
-
-        if not path:
-            return
-
-        with open(
-            path,
-            "w",
-            newline="",
-            encoding="utf-8-sig"
-        ) as f:
-
-            writer = csv.writer(f)
-
-            headers = []
-
-            for c in range(
-                table.columnCount()
-            ):
-                headers.append(
-                    table.horizontalHeaderItem(
-                        c
-                    ).text()
-                )
-
-            writer.writerow(headers)
-
-            for r in range(
-                table.rowCount()
-            ):
-
-                row = []
-
-                for c in range(
-                    table.columnCount()
-                ):
-
-                    item = table.item(r, c)
-
-                    row.append(
-                        item.text()
-                        if item
-                        else ""
-                    )
-
-                writer.writerow(row)
-
-        QMessageBox.information(
-            self,
-            "Export Complete",
-            "CSV exported successfully."
-        )
+    def _export_table_widget_csv(self, table, filename):
+        path,_=QFileDialog.getSaveFileName(self,"Export CSV",f"{filename}.csv","CSV (*.csv)")
+        if not path:return
+        with open(path,"w",newline="",encoding="utf-8-sig") as f:
+            writer=csv.writer(f)
+            writer.writerow([table.horizontalHeaderItem(c).text() for c in range(table.columnCount())])
+            for r in range(table.rowCount()):
+                writer.writerow([table.item(r,c).text() if table.item(r,c) else "" for c in range(table.columnCount())])
+        self.show_export_success(path)
 
     # ========================================================
     # MASTER DATA
