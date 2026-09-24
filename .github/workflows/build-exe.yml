@@ -36,7 +36,12 @@ jobs:
       - name: Check Python source
         shell: pwsh
         run: |
-          python -m py_compile main.py
+          if (!(Test-Path "app/main.py")) {
+            Write-Error "app/main.py was not found."
+            exit 1
+          }
+
+          python -m py_compile app/main.py
 
       - name: Build EXE
         shell: pwsh
@@ -46,7 +51,7 @@ jobs:
             --windowed `
             --name "HSE-Management-System" `
             --clean `
-            main.py
+            app/main.py
 
       - name: Check generated EXE
         shell: pwsh
