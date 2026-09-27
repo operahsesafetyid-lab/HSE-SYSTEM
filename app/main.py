@@ -1133,18 +1133,18 @@ def generate_observation_card_docx(observation_id, path):
     section.orientation = WD_ORIENT.PORTRAIT
     section.page_width = Inches(8.27)
     section.page_height = Inches(11.69)
-    section.left_margin = Inches(0.25)
-    section.right_margin = Inches(0.25)
-    section.top_margin = Inches(0.22)
-    section.bottom_margin = Inches(0.22)
-    section.header_distance = Inches(0.08)
-    section.footer_distance = Inches(0.08)
+    section.left_margin = Inches(0.16)
+    section.right_margin = Inches(0.16)
+    section.top_margin = Inches(0.16)
+    section.bottom_margin = Inches(0.16)
+    section.header_distance = Inches(0.05)
+    section.footer_distance = Inches(0.05)
 
     # Header: logo | title | document number, matching the sample card.
     header = doc.add_table(rows=1, cols=3)
     header.autofit = False
     header.alignment = WD_TABLE_ALIGNMENT.CENTER
-    hw = [1.05, 5.15, 1.45]
+    hw = [1.05, 5.38, 1.35]
     for i, w in enumerate(hw):
         header.rows[0].cells[i].width = Inches(w)
         _set_docx_cell_margins(header.rows[0].cells[i], 30, 45, 30, 45)
@@ -1162,12 +1162,12 @@ def generate_observation_card_docx(observation_id, path):
     c = header.rows[0].cells[1]
     c.text = ""
     p = c.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("HSE OBSERVATION AND STOP CARD"); r.bold = True; r.font.size = Pt(13)
+    r = p.add_run("HSE OBSERVATION AND STOP CARD"); r.bold = True; r.font.size = Pt(15)
     c = header.rows[0].cells[2]
     c.text = ""
     p = c.paragraphs[0]; p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    r = p.add_run("Document Number\n"); r.bold = True; r.font.size = Pt(6.5)
-    r = p.add_run(xml_safe(row["number"])); r.bold = True; r.font.size = Pt(8)
+    r = p.add_run("Document Number\n"); r.bold = True; r.font.size = Pt(7)
+    r = p.add_run(xml_safe(row["number"])); r.bold = True; r.font.size = Pt(9)
     for cell in header.rows[0].cells:
         cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
         set_docx_cell_borders(cell, top={"val":"single","sz":7,"color":"808080"}, bottom={"val":"single","sz":7,"color":"808080"}, left={"val":"single","sz":7,"color":"808080"}, right={"val":"single","sz":7,"color":"808080"})
@@ -1180,7 +1180,7 @@ def generate_observation_card_docx(observation_id, path):
     outer = doc.add_table(rows=1, cols=2)
     outer.autofit = False
     outer.alignment = WD_TABLE_ALIGNMENT.CENTER
-    outer_widths = [3.55, 3.85]
+    outer_widths = [3.72, 4.00]
     for i, w in enumerate(outer_widths):
         outer.rows[0].cells[i].width = Inches(w)
         _set_docx_cell_margins(outer.rows[0].cells[i], 20, 30, 20, 30)
@@ -1192,7 +1192,7 @@ def generate_observation_card_docx(observation_id, path):
     left.text = ""
     lt = left.add_table(rows=1, cols=2)
     lt.autofit = False
-    lt.columns[0].width = Inches(1.35); lt.columns[1].width = Inches(2.05)
+    lt.columns[0].width = Inches(1.40); lt.columns[1].width = Inches(2.22)
     lt.rows[0].cells[0].merge(lt.rows[0].cells[1])
     lt.rows[0].cells[0].text = "OBSERVATION / STOP CARD"
     add_docx_cell_shading(lt.rows[0].cells[0], "D9E2F3")
@@ -1212,9 +1212,9 @@ def generate_observation_card_docx(observation_id, path):
     ]
     for label, value in fields:
         cells = lt.add_row().cells
-        cells[0].width = Inches(1.35); cells[1].width = Inches(2.05)
-        _card_cell_text(cells[0], label, "", font_size=6.0)
-        _card_cell_text(cells[1], "", value, font_size=6.0)
+        cells[0].width = Inches(1.40); cells[1].width = Inches(2.22)
+        _card_cell_text(cells[0], label, "", font_size=6.5)
+        _card_cell_text(cells[1], "", value, font_size=6.5)
         add_docx_cell_shading(cells[0], "EDEDED")
         for cell in cells:
             set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
@@ -1225,26 +1225,26 @@ def generate_observation_card_docx(observation_id, path):
     p = cells[0].add_paragraph(); p.paragraph_format.space_after = Pt(0); p.paragraph_format.space_before = Pt(0)
     for typ in OBS_TYPES:
         mark = "☑" if typ == safe(row["obs_type"]) else "☐"
-        run = p.add_run(f"{mark} {typ}   "); run.font.size = Pt(5.4)
+        run = p.add_run(f"{mark} {typ}   "); run.font.size = Pt(5.8)
 
     cells = lt.add_row().cells; cells[0].merge(cells[1]); cells[0].text = "Observation Details"
     add_docx_cell_shading(cells[0], "EDEDED")
     p = cells[0].add_paragraph(xml_safe(row["observation"]) or "No observation detail recorded.")
     p.paragraph_format.space_after = Pt(0); p.paragraph_format.line_spacing = 0.85
-    for rr in p.runs: rr.font.size = Pt(6.1)
+    for rr in p.runs: rr.font.size = Pt(6.8)
 
     cells = lt.add_row().cells; cells[0].merge(cells[1]); cells[0].text = "Action Taken / Corrective Action"
     add_docx_cell_shading(cells[0], "EDEDED")
     p = cells[0].add_paragraph(xml_safe(row["corrective_action"]) or "No action recorded.")
     p.paragraph_format.space_after = Pt(0); p.paragraph_format.line_spacing = 0.85
-    for rr in p.runs: rr.font.size = Pt(6.1)
+    for rr in p.runs: rr.font.size = Pt(6.8)
 
     cells = lt.add_row().cells; cells[0].merge(cells[1]); cells[0].text = "Related Factors / Category"
     add_docx_cell_shading(cells[0], "EDEDED")
     p = cells[0].add_paragraph()
     related = safe(row["category"])
     if safe(row["subcategory"]): related += " / " + safe(row["subcategory"])
-    p.add_run("☑ " + xml_safe(related) if related else "☐ Not specified").font.size = Pt(6)
+    p.add_run("☑ " + xml_safe(related) if related else "☐ Not specified").font.size = Pt(6.5)
 
     cells = lt.add_row().cells; cells[0].merge(cells[1]); cells[0].text = "Evidence"
     add_docx_cell_shading(cells[0], "EDEDED")
@@ -1257,7 +1257,7 @@ def generate_observation_card_docx(observation_id, path):
     right.text = ""
     rt = right.add_table(rows=1, cols=2)
     rt.autofit = False
-    rt.columns[0].width = Inches(1.25); rt.columns[1].width = Inches(2.45)
+    rt.columns[0].width = Inches(1.35); rt.columns[1].width = Inches(2.60)
     rt.rows[0].cells[0].merge(rt.rows[0].cells[1])
     rt.rows[0].cells[0].text = "HAZARD IDENTIFICATION CARD"
     add_docx_cell_shading(rt.rows[0].cells[0], "D9E2F3")
@@ -1273,7 +1273,7 @@ def generate_observation_card_docx(observation_id, path):
 
     def add_card_checklist(label, options, selected_value, font_size=5.3):
         cells = rt.add_row().cells
-        cells[0].width = Inches(1.25); cells[1].width = Inches(2.45)
+        cells[0].width = Inches(1.35); cells[1].width = Inches(2.60)
         cells[0].text = label
         add_docx_cell_shading(cells[0], "F2F2F2")
         cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -1324,19 +1324,19 @@ def generate_observation_card_docx(observation_id, path):
             parts.append(("☑ " if rcat == selected_cat else "☐ ") + rcat)
         for j, txt in enumerate(parts):
             rr = hp.add_run(txt + ("     " if j == 0 and len(parts) > 1 else ""))
-            rr.font.size = Pt(4.15)
+            rr.font.size = Pt(4.8)
     if selected_subcat:
         hp = hazard_cells[1].add_paragraph()
         hp.paragraph_format.space_after = Pt(0); hp.paragraph_format.space_before = Pt(0)
-        rr = hp.add_run("Subcategory: " + selected_subcat); rr.bold = True; rr.font.size = Pt(4.2)
+        rr = hp.add_run("Subcategory: " + selected_subcat); rr.bold = True; rr.font.size = Pt(5.8)
     for cell in hazard_cells:
         set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
         _set_docx_cell_margins(cell, 25, 30, 25, 30)
 
     # Observation Type is intentionally kept on the LEFT side of the STOP card.
     # Do not repeat the sample observation-type checklist on the right.
-    add_card_checklist("Priority", PRIORITIES, selected_priority, 4.9)
-    add_card_checklist("Status", STATUSES, selected_status, 4.9)
+    add_card_checklist("Priority", PRIORITIES, selected_priority, 5.4)
+    add_card_checklist("Status", STATUSES, selected_status, 5.4)
 
     action_cells = rt.add_row().cells
     action_cells[0].width = Inches(1.25); action_cells[1].width = Inches(2.45)
@@ -1347,7 +1347,7 @@ def generate_observation_card_docx(observation_id, path):
         rr.bold = True; rr.font.size = Pt(5.8)
     action_cells[1].text = xml_safe(row["corrective_action"]) or "No action recorded."
     for rr in action_cells[1].paragraphs[0].runs:
-        rr.font.size = Pt(5.0)
+        rr.font.size = Pt(5.8)
     for cell in action_cells:
         set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
         _set_docx_cell_margins(cell, 25, 30, 25, 30)
@@ -1363,7 +1363,7 @@ def generate_observation_card_docx(observation_id, path):
     if footer:
         fp = section.footer.paragraphs[0]
         fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        rr = fp.add_run(xml_safe(footer)); rr.font.size = Pt(5.5)
+        rr = fp.add_run(xml_safe(footer)); rr.font.size = Pt(6)
 
     save_docx_validated(doc, path)
 
