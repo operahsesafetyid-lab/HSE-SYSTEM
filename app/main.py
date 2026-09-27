@@ -32,13 +32,14 @@ from openpyxl.styles import Alignment
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.section import WD_ORIENT
 from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -659,9 +660,10 @@ def set_docx_cell_borders(cell, **kwargs):
                     element.set(qn("w:{}".format(key)), str(edge_data[key]))
 
 
-def style_docx_table(table, header=True):
+def style_docx_table(table, header=True, font_size=7):
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.style = "Table Grid"
+    table.autofit = False
     for row_index, row in enumerate(table.rows):
         for cell in row.cells:
             cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -672,6 +674,11 @@ def style_docx_table(table, header=True):
                 left={"val": "single", "sz": 6, "color": "808080"},
                 right={"val": "single", "sz": 6, "color": "808080"},
             )
+            for paragraph in cell.paragraphs:
+                paragraph.paragraph_format.space_after = Pt(0)
+                paragraph.paragraph_format.space_before = Pt(0)
+                for run in paragraph.runs:
+                    run.font.size = Pt(font_size)
             if header and row_index == 0:
                 add_docx_cell_shading(cell)
                 for run in cell.paragraphs[0].runs:
@@ -849,7 +856,127 @@ def generate_incident_docx(incident_id, path):
     save_docx_validated(doc, path)
 
 
+OBSERVATION_EXPORT_FIELDS = [
+    ("ID", "id"), ("Observation No.", "number"), ("Observation Date", "obs_date"),
+    ("Observation Time", "obs_time"), ("Project", "project"), ("Company", "company"),
+    ("Location", "location"), ("Area", "area"), ("Responsible Person", "responsible"),
+    ("Designation", "designation"), ("Employee ID", "employee_id"), ("Observer", "observer"),
+    ("Observer Designation", "observer_designation"), ("Observer ID", "observer_id"),
+    ("Observer Company", "observer_company"), ("Observation Type", "obs_type"),
+    ("Category", "category"), ("Subcategory", "subcategory"),
+    ("Observation Description", "observation"),
+    ("Action Required / Corrective Action", "corrective_action"),
+    ("Priority", "priority"), ("Target Date", "target_date"), ("Status", "status"),
+    ("Closeout Date", "closeout_date"), ("Closed By", "closed_by"),
+    ("Verified By", "verified_by"), ("Verification Date", "verification_date"),
+    ("Closeout Comments", "closeout_comments"), ("Verification", "verification"),
+    ("Attachments", "__attachments__"),
+]
+
+
+def observation_export_rows(record_ids=None):
+    params=[]
+    where=""
+    if record_ids:
+        placeholders=",".join("?" for _ in record_ids)
+        where=f" WHERE id IN ({placeholders})"
+        params=list(record_ids)
+    rows=db.fetchall(f"SELECT * FROM observations{where} ORDER BY id DESC", params)
+    columns=[x[0] for x in OBSERVATION_EXPORT_FIELDS]
+    data=[]
+    for row in rows:
+        values=[]
+        for _, key in OBSERVATION_EXPORT_FIELDS:
+            if key == "__attachments__":
+                value=attachment_names("observation_attachments", row["id"])
+            else:
+                value=row[key]
+            values.append(xml_safe(value))
+        data.append(values)
+    return columns, data, rows
+
+
+def set_docx_landscape(document):
+    section=document.sections[0]
+    section.orientation=WD_ORIENT.LANDSCAPE
+    section.page_width, section.page_height=section.page_height, section.page_width
+    section.left_margin=Inches(0.35)
+    section.right_margin=Inches(0.35)
+    section.top_margin=Inches(0.45)
+    section.bottom_margin=Inches(0.45)
+
+
+def add_observation_attachments_to_docx(document, observation_rows):
+    document.add_heading("Attachments / Evidence", level=2)
+    any_attachment=False
+    for obs in observation_rows:
+        attachments=attachment_rows("observation_attachments", obs["id"])
+        if not attachments:
+            continue
+        any_attachment=True
+        p=document.add_paragraph()
+        r=p.add_run(f"Observation {safe(obs['number'])}")
+        r.bold=True
+        table=document.add_table(rows=1, cols=4)
+        hdr=table.rows[0].cells
+        for i, label in enumerate(["No.", "Attachment / Evidence", "Type", "Status"]):
+            hdr[i].text=label
+        for i,a in enumerate(attachments,1):
+            cells=table.add_row().cells
+            path=Path(safe(a["file_path"]))
+            cells[0].text=str(i)
+            cells[1].text=path.name
+            cells[2].text=xml_safe(a["attachment_type"])
+            if path.exists() and path.suffix.lower() in {".png",".jpg",".jpeg",".bmp"}:
+                try:
+                    cells[3].text="Image evidence embedded below"
+                    pic=document.add_paragraph()
+                    pic.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                    run=pic.add_run()
+                    run.add_picture(str(path), width=Inches(6.5))
+                except Exception as exc:
+                    logging.exception("Unable to embed observation image attachment: %s", exc)
+                    cells[3].text="Image file recorded; could not embed"
+            elif path.exists():
+                cells[3].text="File recorded in attachment register"
+            else:
+                cells[3].text="File not found"
+        style_docx_table(table, header=True, font_size=8)
+    if not any_attachment:
+        document.add_paragraph("No attachments recorded for the exported observations.")
+
+
+def generate_observation_docx(path, record_ids=None):
+    columns, data, rows=observation_export_rows(record_ids)
+    if not rows:
+        raise ValueError("There is no observation data to export.")
+    doc=Document()
+    set_docx_landscape(doc)
+    add_docx_header(doc)
+    add_docx_title(doc, "HSE OBSERVATION / INSPECTION REPORT")
+    p=doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    p.alignment=WD_ALIGN_PARAGRAPH.RIGHT
+    table=doc.add_table(rows=1, cols=len(columns))
+    for i,col in enumerate(columns):
+        table.rows[0].cells[i].text=xml_safe(col)
+    for values in data[:1000]:
+        cells=table.add_row().cells
+        for i,value in enumerate(values):
+            cells[i].text=xml_safe(value)
+    # Keep one consistent table layout with fixed widths and small readable text.
+    widths=[0.38,0.78,0.72,0.62,0.75,0.75,0.95,0.75,0.85,0.75,0.65,0.8,0.85,0.65,0.8,0.85,0.8,0.8,1.45,1.35,0.62,0.78,0.7,0.75,0.75,0.75,0.8,1.0,0.9,1.55]
+    for row in table.rows:
+        for i,cell in enumerate(row.cells):
+            cell.width=Inches(widths[i] if i < len(widths) else 0.8)
+    style_docx_table(table, header=True, font_size=5.5)
+    add_observation_attachments_to_docx(doc, rows)
+    add_docx_footer(doc)
+    save_docx_validated(doc, path)
+
+
 def generate_table_docx(table_name, path, record_ids=None):
+    if table_name == "observations":
+        return generate_observation_docx(path, record_ids=record_ids)
     columns, data = MainWindow.table_data_static(table_name, record_ids=record_ids)
     if not columns:
         raise ValueError("There is no data to export.")
@@ -1168,25 +1295,22 @@ class MainWindow(QMainWindow):
         w, layout = self.page("HSE Inspection Register")
         toolbar = QHBoxLayout()
         search = QLineEdit()
-        search.setPlaceholderText("Search number, location, responsible person, description...")
+        search.setPlaceholderText("Search observation no., location, responsible person, description, action...")
         toolbar.addWidget(search)
         add_button = QPushButton("+ New Observation")
+        attachment_button = QPushButton("Attachments")
         delete_button = QPushButton("Delete Selected")
         export_button = QPushButton("Export CSV")
         excel_button = QPushButton("Export Excel")
         pdf_button = QPushButton("Export PDF")
         word_button = QPushButton("Export Word")
-        toolbar.addWidget(add_button)
-        toolbar.addWidget(delete_button)
-        toolbar.addWidget(export_button)
-        toolbar.addWidget(excel_button)
-        toolbar.addWidget(pdf_button)
-        toolbar.addWidget(word_button)
+        for b in [add_button, attachment_button, delete_button, export_button, excel_button, pdf_button, word_button]:
+            toolbar.addWidget(b)
         layout.addLayout(toolbar)
 
         table = QTableWidget()
-        headers = ["ID","Number","Date","Type","Category","Location","Responsible",
-                   "Priority","Target","Status","Overdue","Observation Details"]
+        headers = ["ID", "Observation No.", "Observation Date", "Observation Type", "Status",
+                   "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
@@ -1194,6 +1318,7 @@ class MainWindow(QMainWindow):
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setWordWrap(True)
+        table.setAlternatingRowColors(True)
         layout.addWidget(table)
 
         def load():
@@ -1201,36 +1326,74 @@ class MainWindow(QMainWindow):
             query = "SELECT * FROM observations"
             params = ()
             if term:
-                query += """ WHERE number LIKE ? OR location LIKE ? OR responsible LIKE ? OR observation LIKE ?"""
+                query += """ WHERE number LIKE ? OR location LIKE ? OR responsible LIKE ? OR observation LIKE ? OR corrective_action LIKE ?"""
                 like = f"%{term}%"
-                params = (like, like, like, like)
+                params = (like, like, like, like, like)
             query += " ORDER BY id DESC"
             rows = db.fetchall(query, params)
             table.setRowCount(len(rows))
             for r, row in enumerate(rows):
+                attachments = attachment_names("observation_attachments", row["id"])
                 values = [
-                    row["id"], row["number"], row["obs_date"], row["obs_type"],
-                    row["category"], row["location"], row["responsible"],
-                    row["priority"], row["target_date"], row["status"],
-                    "OVERDUE" if overdue(row["target_date"], row["status"]) else "",
-                    row["observation"]
+                    row["id"], row["number"], row["obs_date"], row["obs_type"], row["status"],
+                    row["location"], row["corrective_action"], row["target_date"], attachments or "No attachment"
                 ]
                 for c, value in enumerate(values):
                     item = QTableWidgetItem(safe(value))
                     item.setToolTip(safe(value))
-                    if c == 10 and value:
-                        item.setForeground(Qt.GlobalColor.red)
                     table.setItem(r, c, item)
+                if overdue(row["target_date"], row["status"]):
+                    table.item(r, 7).setForeground(Qt.GlobalColor.red)
+                    table.item(r, 4).setForeground(Qt.GlobalColor.red)
+                table.setRowHeight(r, 48)
+
+        def selected_observation_id():
+            row = table.currentRow()
+            if row < 0 or not table.item(row, 0):
+                QMessageBox.warning(self, "Observation", "Select an observation first.")
+                return None
+            return int(table.item(row, 0).text())
+
+        def manage_attachments():
+            obs_id = selected_observation_id()
+            if obs_id is None:
+                return
+            record = db.fetchone("SELECT number FROM observations WHERE id=?", (obs_id,))
+            if not record:
+                return
+            dialog = QDialog(self)
+            dialog.setWindowTitle(f"Attachments - {record['number']}")
+            dialog.resize(760, 480)
+            v = QVBoxLayout(dialog)
+            v.addWidget(QLabel(f"<b>Observation:</b> {safe(record['number'])}"))
+            listw = QListWidget()
+            v.addWidget(listw, 1)
+            def refresh_files():
+                listw.clear()
+                rows = attachment_rows("observation_attachments", obs_id)
+                for a in rows:
+                    p = Path(safe(a["file_path"]))
+                    listw.addItem(f"{p.name}  |  {safe(a['attachment_type'])}")
+                if not rows:
+                    listw.addItem("No attachments recorded.")
+            def add_files():
+                paths, _ = QFileDialog.getOpenFileNames(
+                    dialog, "Add Observation Evidence", "",
+                    "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
+                )
+                if paths:
+                    copy_attachments(paths, safe(record["number"]), "observation_attachments", obs_id)
+                    refresh_files(); load()
+            add = QPushButton("Add Attachment")
+            close = QPushButton("Close")
+            rowbtn = QHBoxLayout(); rowbtn.addWidget(add); rowbtn.addStretch(); rowbtn.addWidget(close); v.addLayout(rowbtn)
+            add.clicked.connect(add_files); close.clicked.connect(dialog.accept)
+            refresh_files(); dialog.exec()
 
         def delete_selected():
-            row = table.currentRow()
-            if row < 0:
-                QMessageBox.warning(self, "Delete Observation", "Select an observation first.")
+            obs_id = selected_observation_id()
+            if obs_id is None:
                 return
-            item = table.item(row, 0)
-            if not item:
-                return
-            obs_id = int(item.text())
             record = db.fetchone("SELECT number FROM observations WHERE id=?", (obs_id,))
             if not record:
                 return
@@ -1240,10 +1403,9 @@ class MainWindow(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return
-            attachments = attachment_rows("observation_attachments", obs_id)
-            for a in attachments:
+            for a in attachment_rows("observation_attachments", obs_id):
                 try:
-                    Path(a["file_path"]).unlink(missing_ok=True)
+                    Path(safe(a["file_path"])).unlink(missing_ok=True)
                 except Exception:
                     logging.exception("Unable to remove observation attachment")
             db.execute("DELETE FROM observations WHERE id=?", (obs_id,))
@@ -1251,6 +1413,7 @@ class MainWindow(QMainWindow):
 
         search.textChanged.connect(load)
         add_button.clicked.connect(lambda: self.observation_form(load))
+        attachment_button.clicked.connect(manage_attachments)
         delete_button.clicked.connect(delete_selected)
         export_button.clicked.connect(lambda: self.export_csv("observations"))
         excel_button.clicked.connect(lambda: self.export_excel("observations"))
@@ -1259,12 +1422,11 @@ class MainWindow(QMainWindow):
         load()
 
 
-
     def observation_form(self, refresh):
         dialog = QDialog(self)
         dialog.setWindowTitle("New HSE Observation / Inspection")
-        dialog.resize(980, 820)
-        dialog.setMinimumSize(900, 700)
+        dialog.resize(980, 760)
+        dialog.setMinimumSize(900, 650)
         outer = QVBoxLayout(dialog)
 
         header = QLabel("HSE Inspection Observation")
@@ -1296,12 +1458,8 @@ class MainWindow(QMainWindow):
 
         observation = QTextEdit(); observation.setMinimumHeight(100)
         form.addRow("Observation Description:", observation)
-        immediate = QTextEdit(); immediate.setMinimumHeight(80)
-        form.addRow("Immediate Action:", immediate)
-        corrective = QTextEdit(); corrective.setMinimumHeight(80)
-        form.addRow("Corrective Action:", corrective)
-        preventive = QTextEdit(); preventive.setMinimumHeight(80)
-        form.addRow("Preventive Action:", preventive)
+        corrective = QTextEdit(); corrective.setMinimumHeight(90)
+        form.addRow("Action Required / Corrective Action:", corrective)
 
         priority = QComboBox(); priority.addItems(PRIORITIES)
         form.addRow("Priority:", priority)
@@ -1355,18 +1513,16 @@ class MainWindow(QMainWindow):
                         number, obs_date, obs_time, project, company, location, area,
                         responsible, designation, employee_id, observer, observer_designation,
                         observer_id, observer_company, obs_type, category, subcategory,
-                        observation, immediate_action, corrective_action, preventive_action,
-                        priority, target_date, status, created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        observation, corrective_action, priority, target_date, status, created_at
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     number, today(), now_time(), edits["project"].text(), edits["company"].text(),
                     edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
                     edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
                     edits["observer_designation"].text(), edits["observer_id"].text(),
                     edits["observer_company"].text(), obs_type.currentText(), category.currentText(),
-                    edits["subcategory"].text(), observation.toPlainText(), immediate.toPlainText(),
-                    corrective.toPlainText(), preventive.toPlainText(), priority.currentText(),
-                    target.date().toString("yyyy-MM-dd"), status.currentText(), datetime.now().isoformat()
+                    edits["subcategory"].text(), observation.toPlainText(), corrective.toPlainText(),
+                    priority.currentText(), target.date().toString("yyyy-MM-dd"), status.currentText(), datetime.now().isoformat()
                 ))
                 row = db.fetchone("SELECT id FROM observations WHERE number=?", (number,))
                 if row and attachment_paths:
@@ -1379,6 +1535,7 @@ class MainWindow(QMainWindow):
 
         save_button.clicked.connect(save)
         dialog.exec()
+
 
     def incidents(self):
         w, layout = self.page("Accident / Incident Investigation")
@@ -1820,6 +1977,9 @@ class MainWindow(QMainWindow):
         allowed = {"observations", "incidents", "audits", "capa"}
         if table_name not in allowed:
             raise ValueError("Invalid report table.")
+        if table_name == "observations":
+            columns, data, _ = observation_export_rows(record_ids)
+            return columns, data
         params = []
         where = ""
         if record_ids:
@@ -1897,6 +2057,8 @@ class MainWindow(QMainWindow):
                 col=columns.index("Attachments")+1
                 for r in range(2, ws.max_row+1):
                     ws.cell(r,col).alignment=Alignment(wrap_text=True, vertical="top")
+                    # Make the attachment cell readable; the dedicated Attachments sheet below contains file-level hyperlinks.
+                    ws.cell(r,col).hyperlink = f"#'Attachments'!A1"
             for column_cells in ws.columns:
                 letter=column_cells[0].column_letter
                 max_len=min(55,max(len(xml_safe(c.value)) if c.value is not None else 0 for c in column_cells)+2)
@@ -1959,14 +2121,26 @@ class MainWindow(QMainWindow):
             story.append(Paragraph(xml_safe(f"{table_name.title()} Report | Document Prefix: {document_prefix()}"),styles["Heading2"]))
             story.append(Paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}",styles["Normal"]))
             story.append(Spacer(1,12))
-            if len(columns) > 10 and "Attachments" in columns:
-                display_indices=list(range(9))+[columns.index("Attachments")]
+            if table_name == "observations":
+                # Observation reports use a compact, consistent register layout and explicitly show evidence.
+                preferred = ["Observation No.", "Observation Date", "Observation Type", "Status",
+                             "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
+                display_indices=[columns.index(c) for c in preferred if c in columns]
+                pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
+                col_widths=[0.85*72,0.8*72,1.0*72,0.7*72,1.0*72,2.4*72,0.85*72,1.8*72]
+                t=Table(pdf_data,repeatRows=1,colWidths=col_widths[:len(display_indices)])
             else:
-                display_indices=list(range(min(len(columns),10)))
-            pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
-            t=Table(pdf_data,repeatRows=1); t.setStyle(TableStyle([
+                if len(columns) > 10 and "Attachments" in columns:
+                    display_indices=list(range(9))+[columns.index("Attachments")]
+                else:
+                    display_indices=list(range(min(len(columns),10)))
+                pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
+                t=Table(pdf_data,repeatRows=1)
+            t.setStyle(TableStyle([
                 ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
-                ("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP")]))
+                ("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP"),
+                ("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3),
+                ("TOPPADDING",(0,0),(-1,-1),3),("BOTTOMPADDING",(0,0),(-1,-1),3)]))
             story.append(t)
             footer=db.setting("report_footer","")
             if footer: story.extend([Spacer(1,10),Paragraph(xml_safe(footer),styles["Normal"])])
