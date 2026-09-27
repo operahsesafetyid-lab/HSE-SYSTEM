@@ -1301,7 +1301,7 @@ def generate_observation_card_docx(observation_id, path):
             set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
             _set_docx_cell_margins(cell, 25, 30, 25, 30)
 
-    for rowx in lt.rows + rt.rows:
+    for rowx in list(lt.rows) + list(rt.rows):
         _set_docx_row_height(rowx, 260, "atLeast")
 
     for p in doc.paragraphs:
