@@ -1122,7 +1122,7 @@ def _add_card_image_evidence(cell, attachments):
 def generate_observation_card_docx(observation_id, path):
     """Create a one-page, portrait HSE Observation / STOP Card for one selected observation.
     The layout follows the supplied sample: branded header, observation card on the left,
-    hazard-identification checklist on the right, and visible evidence images.
+    dynamic hazard-category checklist on the right, and visible evidence images.
     """
     row = db.fetchone("SELECT * FROM observations WHERE id=?", (observation_id,))
     if not row:
@@ -1252,8 +1252,7 @@ def generate_observation_card_docx(observation_id, path):
     for cell in lt.rows[-1].cells:
         _set_docx_cell_margins(cell, 30, 40, 30, 40)
 
-    # RIGHT: keep the sample-style HAZARD IDENTIFICATION CARD, but populate it
-    # from the selected observation instead of using fixed sample hazards.
+    # RIGHT: HAZARD IDENTIFICATION CARD using the application hazard categories.
     right = outer.rows[0].cells[1]
     right.text = ""
     rt = right.add_table(rows=1, cols=2)
@@ -1293,10 +1292,12 @@ def generate_observation_card_docx(observation_id, path):
             set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
             _set_docx_cell_margins(cell, 25, 30, 25, 30)
 
-    # Hazard information from the existing Observation menu.
+    # HAZARD IDENTIFICATION: show every HSE category available in the Observation menu.
+    # The selected observation category is marked with a tick.  The sample card's
+    # fixed hazard checklist is intentionally not copied into the generated card.
     hazard_cells = rt.add_row().cells
     hazard_cells[0].width = Inches(1.25); hazard_cells[1].width = Inches(2.45)
-    hazard_cells[0].text = "Hazard Type"
+    hazard_cells[0].text = "Hazard Category"
     add_docx_cell_shading(hazard_cells[0], "F2F2F2")
     hazard_cells[0].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.CENTER
     for rr in hazard_cells[0].paragraphs[0].runs:
@@ -1304,18 +1305,38 @@ def generate_observation_card_docx(observation_id, path):
     hazard_cells[1].text = ""
     hp = hazard_cells[1].paragraphs[0]
     hp.paragraph_format.space_after = Pt(0); hp.paragraph_format.space_before = Pt(0)
-    rr = hp.add_run(("☑ " if selected_cat else "☐ ") + (selected_cat or "Not specified"))
-    rr.bold = True; rr.font.size = Pt(5.5)
+    hp.paragraph_format.line_spacing = 0.72
+    # Two compact columns keep all categories visible on the single-page card.
+    left_cats = CATEGORIES[::2]
+    right_cats = CATEGORIES[1::2]
+    max_rows = max(len(left_cats), len(right_cats))
+    for i in range(max_rows):
+        if i:
+            hp = hazard_cells[1].add_paragraph()
+            hp.paragraph_format.space_after = Pt(0); hp.paragraph_format.space_before = Pt(0)
+            hp.paragraph_format.line_spacing = 0.72
+        lcat = left_cats[i] if i < len(left_cats) else ""
+        rcat = right_cats[i] if i < len(right_cats) else ""
+        parts = []
+        if lcat:
+            parts.append(("☑ " if lcat == selected_cat else "☐ ") + lcat)
+        if rcat:
+            parts.append(("☑ " if rcat == selected_cat else "☐ ") + rcat)
+        for j, txt in enumerate(parts):
+            rr = hp.add_run(txt + ("     " if j == 0 and len(parts) > 1 else ""))
+            rr.font.size = Pt(4.15)
     if selected_subcat:
-        rr = hp.add_run("\n☑ Subcategory: " + selected_subcat)
-        rr.font.size = Pt(5.3)
+        hp = hazard_cells[1].add_paragraph()
+        hp.paragraph_format.space_after = Pt(0); hp.paragraph_format.space_before = Pt(0)
+        rr = hp.add_run("Subcategory: " + selected_subcat); rr.bold = True; rr.font.size = Pt(4.2)
     for cell in hazard_cells:
         set_docx_cell_borders(cell, top={"val":"single","sz":5,"color":"999999"}, bottom={"val":"single","sz":5,"color":"999999"}, left={"val":"single","sz":5,"color":"999999"}, right={"val":"single","sz":5,"color":"999999"})
         _set_docx_cell_margins(cell, 25, 30, 25, 30)
 
-    add_card_checklist("Observation Type", OBS_TYPES, selected_type, 4.8)
-    add_card_checklist("Priority", PRIORITIES, selected_priority, 5.0)
-    add_card_checklist("Status", STATUSES, selected_status, 5.0)
+    # Observation Type is intentionally kept on the LEFT side of the STOP card.
+    # Do not repeat the sample observation-type checklist on the right.
+    add_card_checklist("Priority", PRIORITIES, selected_priority, 4.9)
+    add_card_checklist("Status", STATUSES, selected_status, 4.9)
 
     action_cells = rt.add_row().cells
     action_cells[0].width = Inches(1.25); action_cells[1].width = Inches(2.45)
