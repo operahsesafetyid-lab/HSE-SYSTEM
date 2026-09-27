@@ -28,6 +28,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment
 from docx import Document
 from docx.shared import Inches, Pt
@@ -857,7 +858,7 @@ def generate_incident_docx(incident_id, path):
 
 
 OBSERVATION_EXPORT_FIELDS = [
-    ("ID", "id"), ("Observation No.", "number"), ("Observation Date", "obs_date"),
+    ("S.No.", "__serial__"), ("Observation No.", "number"), ("Observation Date", "obs_date"),
     ("Observation Time", "obs_time"), ("Project", "project"), ("Company", "company"),
     ("Location", "location"), ("Area", "area"), ("Responsible Person", "responsible"),
     ("Designation", "designation"), ("Employee ID", "employee_id"), ("Observer", "observer"),
@@ -884,10 +885,12 @@ def observation_export_rows(record_ids=None):
     rows=db.fetchall(f"SELECT * FROM observations{where} ORDER BY id DESC", params)
     columns=[x[0] for x in OBSERVATION_EXPORT_FIELDS]
     data=[]
-    for row in rows:
+    for serial, row in enumerate(rows, 1):
         values=[]
         for _, key in OBSERVATION_EXPORT_FIELDS:
-            if key == "__attachments__":
+            if key == "__serial__":
+                value=serial
+            elif key == "__attachments__":
                 value=attachment_names("observation_attachments", row["id"])
             else:
                 value=row[key]
@@ -907,69 +910,102 @@ def set_docx_landscape(document):
 
 
 def add_observation_attachments_to_docx(document, observation_rows):
+    """Add compact attachment information without creating a second wide table."""
     document.add_heading("Attachments / Evidence", level=2)
-    any_attachment=False
-    for obs in observation_rows:
-        attachments=attachment_rows("observation_attachments", obs["id"])
+    table = document.add_table(rows=1, cols=3)
+    hdr = table.rows[0].cells
+    hdr[0].text = "S.No."
+    hdr[1].text = "Observation No."
+    hdr[2].text = "Attachment / Evidence"
+    any_attachment = False
+    for serial, obs in enumerate(observation_rows, 1):
+        attachments = attachment_rows("observation_attachments", obs["id"])
         if not attachments:
             continue
-        any_attachment=True
-        p=document.add_paragraph()
-        r=p.add_run(f"Observation {safe(obs['number'])}")
-        r.bold=True
-        table=document.add_table(rows=1, cols=4)
-        hdr=table.rows[0].cells
-        for i, label in enumerate(["No.", "Attachment / Evidence", "Type", "Status"]):
-            hdr[i].text=label
-        for i,a in enumerate(attachments,1):
-            cells=table.add_row().cells
-            path=Path(safe(a["file_path"]))
-            cells[0].text=str(i)
-            cells[1].text=path.name
-            cells[2].text=xml_safe(a["attachment_type"])
-            if path.exists() and path.suffix.lower() in {".png",".jpg",".jpeg",".bmp"}:
+        any_attachment = True
+        cells = table.add_row().cells
+        cells[0].text = str(serial)
+        cells[1].text = safe(obs["number"])
+        for idx, a in enumerate(attachments):
+            path = Path(safe(a["file_path"]))
+            if idx:
+                cells[2].add_paragraph()
+            p = cells[2].paragraphs[-1]
+            p.paragraph_format.space_after = Pt(0)
+            run = p.add_run(path.name)
+            run.font.size = Pt(7)
+            if path.exists() and path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
                 try:
-                    cells[3].text="Image evidence embedded below"
-                    pic=document.add_paragraph()
-                    pic.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    run=pic.add_run()
-                    run.add_picture(str(path), width=Inches(6.5))
-                except Exception as exc:
-                    logging.exception("Unable to embed observation image attachment: %s", exc)
-                    cells[3].text="Image file recorded; could not embed"
-            elif path.exists():
-                cells[3].text="File recorded in attachment register"
-            else:
-                cells[3].text="File not found"
-        style_docx_table(table, header=True, font_size=8)
+                    p.add_run("  ")
+                    p.add_run().add_picture(str(path), width=Inches(0.55))
+                except Exception:
+                    pass
     if not any_attachment:
-        document.add_paragraph("No attachments recorded for the exported observations.")
+        cells = table.add_row().cells
+        cells[0].merge(cells[2])
+        cells[0].text = "No attachments recorded."
+    style_docx_table(table, header=True, font_size=7)
 
 
 def generate_observation_docx(path, record_ids=None):
-    columns, data, rows=observation_export_rows(record_ids)
+    columns, data, rows = observation_export_rows(record_ids)
     if not rows:
         raise ValueError("There is no observation data to export.")
-    doc=Document()
+    # Use a compact report table containing the requested register fields only.
+    doc = Document()
     set_docx_landscape(doc)
     add_docx_header(doc)
     add_docx_title(doc, "HSE OBSERVATION / INSPECTION REPORT")
-    p=doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    p.alignment=WD_ALIGN_PARAGRAPH.RIGHT
-    table=doc.add_table(rows=1, cols=len(columns))
-    for i,col in enumerate(columns):
-        table.rows[0].cells[i].text=xml_safe(col)
-    for values in data[:1000]:
-        cells=table.add_row().cells
-        for i,value in enumerate(values):
-            cells[i].text=xml_safe(value)
-    # Keep one consistent table layout with fixed widths and small readable text.
-    widths=[0.38,0.78,0.72,0.62,0.75,0.75,0.95,0.75,0.85,0.75,0.65,0.8,0.85,0.65,0.8,0.85,0.8,0.8,1.45,1.35,0.62,0.78,0.7,0.75,0.75,0.75,0.8,1.0,0.9,1.55]
-    for row in table.rows:
-        for i,cell in enumerate(row.cells):
-            cell.width=Inches(widths[i] if i < len(widths) else 0.8)
-    style_docx_table(table, header=True, font_size=5.5)
-    add_observation_attachments_to_docx(doc, rows)
+    p = doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    preferred = ["S.No.", "Observation No.", "Observation Date", "Observation Type", "Status",
+                 "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
+    idx = {name: columns.index(name) for name in preferred if name in columns}
+    report_table = doc.add_table(rows=1, cols=len(preferred))
+    report_table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    for c, name in enumerate(preferred):
+        report_table.rows[0].cells[c].text = name
+    for values, row in zip(data[:1000], rows[:1000]):
+        cells = report_table.add_row().cells
+        for c, name in enumerate(preferred):
+            if name == "Attachments":
+                attachments = attachment_rows("observation_attachments", row["id"])
+                cell = cells[c]
+                if not attachments:
+                    cell.text = "None"
+                else:
+                    cell.text = ""
+                    for ai, a in enumerate(attachments):
+                        if ai:
+                            cell.add_paragraph()
+                        p2 = cell.paragraphs[-1]
+                        p2.paragraph_format.space_after = Pt(0)
+                        rr = p2.add_run(Path(safe(a["file_path"])).name)
+                        rr.font.size = Pt(6.5)
+                        path2 = Path(safe(a["file_path"]))
+                        if path2.exists() and path2.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+                            try:
+                                p2.add_run(" ")
+                                p2.add_run().add_picture(str(path2), width=Inches(0.38))
+                            except Exception:
+                                pass
+            else:
+                cells[c].text = xml_safe(values[idx[name]])
+    widths = [0.38, 0.72, 0.75, 0.90, 0.65, 1.00, 3.00, 0.75, 2.10]  # 10.25 in total within landscape margins
+    for row in report_table.rows:
+        for i, cell in enumerate(row.cells):
+            cell.width = Inches(widths[i])
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.TOP
+            for p2 in cell.paragraphs:
+                p2.paragraph_format.space_after = Pt(0)
+                for run in p2.runs:
+                    run.font.size = Pt(6.2)
+    # Prevent a single observation row from being split between pages.
+    for tr in report_table.rows:
+        trPr = tr._tr.get_or_add_trPr()
+        cant_split = OxmlElement("w:cantSplit")
+        trPr.append(cant_split)
+    style_docx_table(report_table, header=True, font_size=6.2)
     add_docx_footer(doc)
     save_docx_validated(doc, path)
 
@@ -1278,13 +1314,13 @@ class MainWindow(QMainWindow):
         bar_box=QGroupBox("HSE Register Summary"); bl=QVBoxLayout(bar_box); bl.addWidget(bar)
         charts.addWidget(pie_box); charts.addWidget(bar_box); layout.addLayout(charts)
 
-        table=QTableWidget(); table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(["Observation","Type","Category","Location","Priority","Status"])
+        table=QTableWidget(); table.setColumnCount(7)
+        table.setHorizontalHeaderLabels(["Observation","Observation Date","Type","Category","Location","Priority","Status"])
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        rows=db.fetchall("SELECT number,obs_type,category,location,priority,status FROM observations ORDER BY id DESC LIMIT 10")
+        rows=db.fetchall("SELECT number,obs_date,obs_type,category,location,priority,status FROM observations ORDER BY id DESC LIMIT 10")
         table.setRowCount(len(rows))
         for r,row in enumerate(rows):
-            vals=[row["number"],row["obs_type"],row["category"],row["location"],row["priority"],row["status"]]
+            vals=[row["number"],row["obs_date"],row["obs_type"],row["category"],row["location"],row["priority"],row["status"]]
             for c,v in enumerate(vals):
                 table.setItem(r,c,QTableWidgetItem(safe(v)))
         layout.addWidget(QLabel("Recent Observations"))
@@ -1309,10 +1345,11 @@ class MainWindow(QMainWindow):
         layout.addLayout(toolbar)
 
         table = QTableWidget()
-        headers = ["ID", "Observation No.", "Observation Date", "Observation Type", "Status",
+        headers = ["ID", "S.No.", "Observation No.", "Observation Date", "Observation Type", "Status",
                    "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
         table.setColumnCount(len(headers))
         table.setHorizontalHeaderLabels(headers)
+        table.setColumnHidden(0, True)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(True)
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -1335,7 +1372,7 @@ class MainWindow(QMainWindow):
             for r, row in enumerate(rows):
                 attachments = attachment_names("observation_attachments", row["id"])
                 values = [
-                    row["id"], row["number"], row["obs_date"], row["obs_type"], row["status"],
+                    row["id"], r + 1, row["number"], row["obs_date"], row["obs_type"], row["status"],
                     row["location"], row["corrective_action"], row["target_date"], attachments or "No attachment"
                 ]
                 for c, value in enumerate(values):
@@ -1343,8 +1380,8 @@ class MainWindow(QMainWindow):
                     item.setToolTip(safe(value))
                     table.setItem(r, c, item)
                 if overdue(row["target_date"], row["status"]):
-                    table.item(r, 7).setForeground(Qt.GlobalColor.red)
-                    table.item(r, 4).setForeground(Qt.GlobalColor.red)
+                    table.item(r, 8).setForeground(Qt.GlobalColor.red)
+                    table.item(r, 5).setForeground(Qt.GlobalColor.red)
                 table.setRowHeight(r, 48)
 
         def selected_observation_id():
@@ -1446,6 +1483,9 @@ class MainWindow(QMainWindow):
             form.addRow(name.replace("_", " ").title() + ":", e)
             return e
 
+        observation_date = QDateEdit(); observation_date.setCalendarPopup(True); observation_date.setDate(datetime.now().date())
+        form.addRow("Observation Date:", observation_date)
+
         for name in ["project", "company", "location", "area", "responsible", "designation", "employee_id",
                      "observer", "observer_designation", "observer_id", "observer_company"]:
             edit(name)
@@ -1516,7 +1556,7 @@ class MainWindow(QMainWindow):
                         observation, corrective_action, priority, target_date, status, created_at
                     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
-                    number, today(), now_time(), edits["project"].text(), edits["company"].text(),
+                    number, observation_date.date().toString("yyyy-MM-dd"), now_time(), edits["project"].text(), edits["company"].text(),
                     edits["location"].text(), edits["area"].text(), edits["responsible"].text(),
                     edits["designation"].text(), edits["employee_id"].text(), edits["observer"].text(),
                     edits["observer_designation"].text(), edits["observer_id"].text(),
@@ -2048,6 +2088,47 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "No Data", "There is no data to export."); return
             path=self._export_path(f"{table_name}_report.xlsx","Download Excel Report","Excel Files (*.xlsx)")
             if not path: return
+            wb=Workbook(); ws=wb.active; ws.title=table_name[:31]
+            if table_name == "observations":
+                # Observation Excel: actual image evidence is embedded; other evidence is shown by filename.
+                preferred = ["S.No.", "Observation No.", "Observation Date", "Observation Type", "Status", "Location", "Action Required / Corrective Action", "Target Date", "Attachments"]
+                pidx = {name: columns.index(name) for name in preferred if name in columns}
+                ws.append(preferred)
+                obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
+                if record_ids:
+                    obs_rows = [r for r in obs_rows if r["id"] in record_ids]
+                for serial, r in enumerate(obs_rows, 1):
+                    vals=[]
+                    for name in preferred:
+                        if name == "S.No.": vals.append(serial)
+                        elif name == "Attachments": vals.append("; ".join(Path(safe(a["file_path"])).name for a in attachment_rows("observation_attachments", r["id"])) or "None")
+                        else: vals.append(xml_safe(r[pidx[name]]))
+                    ws.append(vals)
+                    excel_row=ws.max_row
+                    ws.cell(excel_row, 9).alignment=Alignment(wrap_text=True, vertical="top")
+                    # Embed image evidence directly in the attachment cell.
+                    for a in attachment_rows("observation_attachments", r["id"]):
+                        fp=Path(safe(a["file_path"]))
+                        if fp.exists() and fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+                            try:
+                                img=XLImage(str(fp)); img.width=min(img.width, 120); img.height=min(img.height, 80)
+                                img.anchor=f"I{excel_row}"; ws.add_image(img)
+                                ws.row_dimensions[excel_row].height=max(ws.row_dimensions[excel_row].height or 15, 65)
+                                break
+                            except Exception: logging.exception("Unable to embed observation image in Excel: %s", fp)
+                for cell in ws[1]: cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True)
+                ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
+                widths=[8,20,14,20,12,22,45,14,38]
+                for i,w in enumerate(widths,1): ws.column_dimensions[chr(64+i)].width=w
+                target=Path(path); temp=target.with_name(target.name + ".tmp.xlsx")
+                try:
+                    wb.save(temp)
+                    with zipfile.ZipFile(temp,"r") as z:
+                        bad=z.testzip()
+                        if bad: raise ValueError(f"Generated Excel report is corrupt: {bad}")
+                    os.replace(temp,target)
+                finally: temp.unlink(missing_ok=True)
+                self.show_export_success(path); return
             wb=Workbook(); ws=wb.active; ws.title=table_name[:31]; ws.append(columns)
             for row in data: ws.append([xml_safe(v) for v in row])
             for cell in ws[1]:
