@@ -29,7 +29,7 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
-from openpyxl.styles import Alignment
+from openpyxl.styles import Alignment, PatternFill
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -2583,17 +2583,19 @@ class MainWindow(QMainWindow):
             wb=Workbook(); ws=wb.active; ws.title=table_name[:31]
             if table_name == "observations":
                 preferred = ["S.No.", "Observation No.", "Observation Date", "Location", "Observation Type", "Category", "Observation Detail", "Action Taken", "Responsible", "Evidence", "Status"]
+                ws.append([company_name(), "HSE Observation Register"] + [""] * (len(preferred) - 2))
+                ws.append(["Project", db.setting("project_name", "")] + [""] * (len(preferred) - 2))
+                ws.append(["", ""] + ["" for _ in range(len(preferred)-2)])
                 ws.append(preferred)
                 obs_rows = db.fetchall("SELECT * FROM observations ORDER BY id DESC")
                 if record_ids:
                     obs_rows = [r for r in obs_rows if r["id"] in record_ids]
-                for serial,r in enumerate(obs_rows,1):
+                for serial, r in enumerate(obs_rows, 1):
                     vals=[serial, r["number"], r["obs_date"], r["location"], r["obs_type"], r["category"], r["observation"], r["corrective_action"], r["responsible"], "", r["status"]]
                     ws.append([xml_safe(v) for v in vals])
                     excel_row=ws.max_row
                     evcell=ws.cell(excel_row,10)
-                    evcell.value=""
-                    evcell.alignment=Alignment(wrap_text=True, vertical="center")
+                    evcell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
                     image_files=[]; other_files=[]
                     for a in attachment_rows("observation_attachments", r["id"]):
                         fp=Path(safe(a["file_path"]))
@@ -2601,31 +2603,60 @@ class MainWindow(QMainWindow):
                             image_files.append(fp)
                         elif fp.exists():
                             other_files.append(fp.name)
-                    if other_files:
-                        evcell.value="; ".join(other_files)
-                    # Embed the first image visibly in the Evidence cell; filenames for additional evidence remain visible.
+                    # Show the first real image directly in the Evidence cell; all other evidence names remain visible.
                     if image_files:
                         try:
                             img=XLImage(str(image_files[0]))
-                            max_w=115; max_h=65
+                            max_w=145; max_h=62
                             ratio=min(max_w/max(img.width,1), max_h/max(img.height,1), 1)
                             img.width=max(1,int(img.width*ratio)); img.height=max(1,int(img.height*ratio))
                             img.anchor=f"J{excel_row}"
                             ws.add_image(img)
-                            ws.row_dimensions[excel_row].height=max(ws.row_dimensions[excel_row].height or 15, 58)
-                            if len(image_files)>1:
-                                evcell.value=(evcell.value + "; " if evcell.value else "") + "; ".join(p.name for p in image_files[1:])
+                            extra=[p.name for p in image_files[1:]] + other_files
+                            evcell.value="; ".join(extra) if extra else "Photo evidence"
                         except Exception:
                             logging.exception("Unable to embed observation image in Excel")
-                            evcell.value="; ".join(p.name for p in image_files + [Path(x) for x in other_files])
-                    elif not other_files:
+                            evcell.value="; ".join([p.name for p in image_files] + other_files)
+                    elif other_files:
+                        evcell.value="; ".join(other_files)
+                    else:
                         evcell.value="None"
-                for cell in ws[1]:
-                    cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True)
+                    ws.row_dimensions[excel_row].height=70
+                # Professional register heading. Keep the logo visible when configured.
+                logo_path=db.setting("company_logo", "")
+                if logo_path and Path(logo_path).exists():
+                    try:
+                        logo=XLImage(logo_path)
+                        logo.width=95; logo.height=55
+                        logo.anchor="A1"
+                        ws.add_image(logo)
+                    except Exception:
+                        logging.exception("Unable to embed company logo in Excel heading")
+                # Heading rows and table header formatting.
+                for r in range(1,5):
+                    ws.row_dimensions[r].height = 24 if r < 4 else 30
+                ws["B1"].font=copy(ws["B1"].font); ws["B1"].font=ws["B1"].font.copy(bold=True, size=16)
+                ws["B2"].font=copy(ws["B2"].font); ws["B2"].font=ws["B2"].font.copy(bold=True, size=12)
+                for cell in ws[4]:
+                    cell.font=copy(cell.font); cell.font=cell.font.copy(bold=True, color="FFFFFF")
+                    cell.fill=PatternFill("solid", fgColor="17365D")
                     cell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
-                ws.freeze_panes="A2"; ws.auto_filter.ref=ws.dimensions
-                widths=[7,20,14,22,19,18,45,38,22,30,13]
-                for i,w in enumerate(widths,1): ws.column_dimensions[chr(64+i)].width=w
+                # All data cells are centered/middle and wrapped; long narrative fields get extra width.
+                for row in ws.iter_rows(min_row=5, max_row=ws.max_row, min_col=1, max_col=len(preferred)):
+                    for cell in row:
+                        cell.alignment=Alignment(horizontal="center", vertical="center", wrap_text=True)
+                widths=[8,20,20,20,20,20,50,50,20,20,20]
+                for i,w in enumerate(widths,1):
+                    ws.column_dimensions[chr(64+i)].width=w
+                ws.freeze_panes="A5"
+                ws.auto_filter.ref=f"A4:K{ws.max_row}"
+                # Real Excel table for the register rows.
+                from openpyxl.worksheet.table import Table, TableStyleInfo
+                if ws.max_row >= 4:
+                    tab=Table(displayName="HSEObservationRegister", ref=f"A4:K{ws.max_row}")
+                    style=TableStyleInfo(name="TableStyleMedium2", showFirstColumn=False, showLastColumn=False, showRowStripes=True, showColumnStripes=False)
+                    tab.tableStyleInfo=style
+                    ws.add_table(tab)
                 target=Path(path); temp=target.with_name(target.name + ".tmp.xlsx")
                 try:
                     wb.save(temp)
@@ -2716,6 +2747,8 @@ class MainWindow(QMainWindow):
                     obs_rows=[r for r in obs_rows if r["id"] in record_ids]
                 pdf_data=[preferred]
                 for serial,r in enumerate(obs_rows,1):
+                    ps=styles["Normal"]
+                    ps.fontSize=5.2; ps.leading=6
                     evidence=[]
                     for a in attachment_rows("observation_attachments",r["id"]):
                         fp=Path(safe(a["file_path"]))
@@ -2723,13 +2756,12 @@ class MainWindow(QMainWindow):
                             try:
                                 im=RLImage(str(fp),width=38,height=30,preserveAspectRatio=True)
                                 evidence.append(im)
-                            except Exception: pass
-                        else:
-                            evidence.append(Paragraph(xml_safe(fp.name), styles["Normal"]))
+                            except Exception:
+                                logging.exception("Unable to embed observation image in PDF")
+                        elif fp.exists():
+                            evidence.append(Paragraph(xml_safe(fp.name), ps))
                     if not evidence:
                         evidence=[Paragraph("None",ps)]
-                    ps=styles["Normal"]
-                    ps.fontSize=5.2; ps.leading=6
                     wrap=lambda v: Paragraph(xml_safe(v).replace("\n","<br/>"), ps)
                     pdf_data.append([wrap(serial),wrap(r["obs_date"]),wrap(r["location"]),wrap(r["obs_type"]),wrap(r["category"]),wrap(r["observation"]),wrap(r["corrective_action"]),wrap(r["responsible"]),evidence,wrap(r["status"])])
                 header_style=styles["Normal"]
