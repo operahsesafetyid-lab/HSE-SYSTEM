@@ -3045,7 +3045,10 @@ class MainWindow(QMainWindow):
             pix=QPixmap(existing_logo)
             logo_preview.setPixmap(pix.scaled(180,80,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
 
-        save=QPushButton("Save Settings"); layout.addWidget(save)
+        save=QPushButton("Save Settings")
+        save.setMinimumHeight(44)
+        save.setToolTip("Save company, project and logo settings. New values will be used by all reports.")
+        layout.addWidget(save)
         save.clicked.connect(lambda:self.save_settings(company,project,location,observer,footer,prefix,logo_path))
         backup=QPushButton("Backup Complete Application Data"); layout.addWidget(backup); backup.clicked.connect(self.backup)
         restore=QPushButton("Restore Application Backup"); layout.addWidget(restore); restore.clicked.connect(self.restore)
@@ -3053,16 +3056,47 @@ class MainWindow(QMainWindow):
         about.clicked.connect(lambda:QMessageBox.information(self,"About",f"{APP_NAME}\nVersion {APP_VERSION}\n\nOffline HSE Management System"))
 
     def save_settings(self, company, project, location, observer, footer, prefix=None, logo_path=None):
-        db.set_setting("company_name",company.text())
-        db.set_setting("project_name",project.text())
-        db.set_setting("default_location",location.text())
-        db.set_setting("default_observer",observer.text())
-        db.set_setting("report_footer",footer.text())
+        # Persist all report branding settings in the application database.
+        # The logo is copied into the application's attachment directory so the
+        # saved report branding does not depend on the user's original file path.
+        db.set_setting("company_name", company.text().strip())
+        db.set_setting("project_name", project.text().strip())
+        db.set_setting("default_location", location.text().strip())
+        db.set_setting("default_observer", observer.text().strip())
+        db.set_setting("report_footer", footer.text().strip())
         if prefix is not None:
-            db.set_setting("document_prefix",prefix.text().strip() or "HSE")
+            db.set_setting("document_prefix", prefix.text().strip() or "HSE")
+
         if logo_path is not None:
-            db.set_setting("company_logo",logo_path.text())
-        QMessageBox.information(self,"Saved","Settings saved successfully.")
+            selected = logo_path.text().strip()
+            if selected:
+                source = Path(selected)
+                if source.exists() and source.is_file():
+                    try:
+                        ATTACH_DIR.mkdir(parents=True, exist_ok=True)
+                        suffix = source.suffix.lower() or ".png"
+                        destination = ATTACH_DIR / f"company_logo{suffix}"
+                        # Remove older saved logo formats so reports always use the
+                        # current logo selected in Settings.
+                        for old in ATTACH_DIR.glob("company_logo.*"):
+                            if old != destination:
+                                old.unlink(missing_ok=True)
+                        if source.resolve() != destination.resolve():
+                            shutil.copy2(source, destination)
+                        selected = str(destination)
+                    except Exception as e:
+                        logging.exception("Unable to persist company logo")
+                        QMessageBox.critical(self, "Logo Error", f"Unable to save the company logo.\n\n{e}")
+                        return
+                elif not source.exists():
+                    QMessageBox.warning(self, "Logo Not Found", "The selected company logo could not be found. The previous saved logo will be kept.")
+                    selected = db.setting("company_logo", "")
+            db.set_setting("company_logo", selected)
+
+        # All report generators read these settings from the database at export
+        # time, so the next Word/Excel/PDF/CSV report immediately uses the new
+        # company name and logo without changing any other module.
+        QMessageBox.information(self, "Saved", "Settings saved successfully. New company name and logo will be used in all new reports.")
         self.dashboard()
 
 
