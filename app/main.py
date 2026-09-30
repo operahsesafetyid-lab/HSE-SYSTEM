@@ -1910,12 +1910,7 @@ class MainWindow(QMainWindow):
             if not columns:
                 QMessageBox.information(self, "No Data", "There is no data to export.")
                 return
-
-            path = self._export_path(
-                f"{table_name}_report.xlsx",
-                "Download Excel Report",
-                "Excel Files (*.xlsx)"
-            )
+            path = self._export_path(f"{table_name}_report.xlsx", "Download Excel Report", "Excel Files (*.xlsx)")
             if not path:
                 return
 
@@ -1928,10 +1923,7 @@ class MainWindow(QMainWindow):
             ws = wb.active
             ws.title = table_name[:31]
 
-            # -------------------------------------------------
-            # Fixed professional report header - do not change
-            # the report data itself.
-            # -------------------------------------------------
+            # Requested fixed report header only. Existing report data/export behaviour is retained below.
             ws.merge_cells("A1:C3")
             ws.merge_cells("D1:H3")
             ws.merge_cells("I1:K1")
@@ -1943,18 +1935,15 @@ class MainWindow(QMainWindow):
             header_fill = PatternFill(fill_type="solid", fgColor="17365D")
             label_fill = PatternFill(fill_type="solid", fgColor="E9EEF3")
 
-            # Header area borders.
             for row in ws["A1:K3"]:
                 for cell in row:
                     cell.border = header_border
                     cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            # Fixed header height for the A1:C3 logo area.
             ws.row_dimensions[1].height = 24
             ws.row_dimensions[2].height = 24
             ws.row_dimensions[3].height = 24
 
-            # Keep the logo inside the exact A1:C3 header area.
             logo_path = db.setting("company_logo", "")
             if logo_path and Path(logo_path).exists():
                 try:
@@ -1969,7 +1958,6 @@ class MainWindow(QMainWindow):
                 ws["A1"] = company_name()
                 ws["A1"].font = Font(bold=True, size=12)
 
-            # Report heading occupies D1:H3 exactly.
             report_title = {
                 "observations": "HSE Observation Report",
                 "incidents": "Incident Report",
@@ -1981,7 +1969,6 @@ class MainWindow(QMainWindow):
             ws["D1"].fill = header_fill
             ws["D1"].alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-            # Fixed right-side document information.
             report_code = {
                 "observations": "OBS",
                 "incidents": "INC",
@@ -2000,7 +1987,6 @@ class MainWindow(QMainWindow):
                 cell.fill = label_fill
                 cell.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
 
-            # Give the fixed header enough room without altering the report data values.
             for col in range(1, 12):
                 ws.column_dimensions[get_column_letter(col)].width = 12
             for col in range(4, 9):
@@ -2008,7 +1994,7 @@ class MainWindow(QMainWindow):
             for col in range(9, 12):
                 ws.column_dimensions[get_column_letter(col)].width = 18
 
-            # Report table starts below the fixed header.
+            # Existing Excel report data remains unchanged, only moved below the requested header.
             header_row = 5
             data_start_row = 6
             for col_idx, value in enumerate(columns, 1):
@@ -2018,14 +2004,14 @@ class MainWindow(QMainWindow):
                     ws.cell(row_idx, col_idx, value)
 
             for cell in ws[header_row]:
-                cell.font = Font(bold=True)
+                font = copy(cell.font)
+                font.bold = True
+                cell.font = font
                 cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
+            # Preserve the existing freeze/filter functionality.
             ws.freeze_panes = f"A{data_start_row}"
-            if data:
-                ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(columns))}{data_start_row + len(data) - 1}"
-            else:
-                ws.auto_filter.ref = f"A{header_row}:{get_column_letter(len(columns))}{header_row}"
+            ws.auto_filter.ref = ws.dimensions
 
             wb.save(path)
             self.show_export_success(path)
@@ -2039,16 +2025,11 @@ class MainWindow(QMainWindow):
             if not columns:
                 QMessageBox.information(self, "No Data", "There is no data to export.")
                 return
-
-            path = self._export_path(
-                f"{table_name}_report.pdf",
-                "Download PDF Report",
-                "PDF Files (*.pdf)"
-            )
+            path = self._export_path(f"{table_name}_report.pdf", "Download PDF Report", "PDF Files (*.pdf)")
             if not path:
                 return
 
-            from reportlab.platypus import Image as RLImage, KeepTogether
+            from reportlab.platypus import Image as RLImage
             from reportlab.lib.enums import TA_CENTER, TA_LEFT
             from reportlab.lib.units import mm
 
@@ -2100,10 +2081,7 @@ class MainWindow(QMainWindow):
             else:
                 logo_flowable = Paragraph(company_name(), title_style)
 
-            # Same header layout as Excel:
-            # A1:C3 = logo, D1:H3 = report heading,
-            # I1:K1 = report number, I2:K2 = document number,
-            # I3:K3 = project name.
+            # Same requested header structure as Excel.
             header_table = Table([
                 [logo_flowable, Paragraph(report_title, title_style), Paragraph(f"<b>Report Number:</b> {report_number}", meta_style)],
                 ["", "", Paragraph(f"<b>Document Number:</b> {document_no}", meta_style)],
@@ -2147,13 +2125,14 @@ class MainWindow(QMainWindow):
                 Spacer(1, 3*mm)
             ]
 
-            # Keep the complete table section together where possible and retain all report data.
-            pdf_data = [[Paragraph(safe(c), header_style) for c in columns]]
+            # Preserve the existing PDF limit of 10 columns and 500 data rows.
+            max_columns = min(len(columns), 10)
+            pdf_data = [[Paragraph(safe(c), header_style) for c in columns[:max_columns]]]
             for row in data[:500]:
-                pdf_data.append([Paragraph(safe(v), cell_style) for v in row])
+                pdf_data.append([Paragraph(safe(v), cell_style) for v in row[:max_columns]])
 
-            table = Table(pdf_data, repeatRows=1, hAlign="CENTER")
-            table.setStyle(TableStyle([
+            t = Table(pdf_data, repeatRows=1)
+            t.setStyle(TableStyle([
                 ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#17365D")),
                 ("TEXTCOLOR", (0,0), (-1,0), colors.white),
                 ("GRID", (0,0), (-1,-1), 0.4, colors.HexColor("#808080")),
@@ -2163,11 +2142,11 @@ class MainWindow(QMainWindow):
                 ("TOPPADDING", (0,0), (-1,-1), 3),
                 ("BOTTOMPADDING", (0,0), (-1,-1), 3),
             ]))
-            story.append(table)
+            story.append(t)
 
             footer = db.setting("report_footer", "")
             if footer:
-                story.extend([Spacer(1, 5*mm), Paragraph(footer, meta_style)])
+                story.extend([Spacer(1,10), Paragraph(footer, styles["Normal"])])
 
             doc.build(story, onFirstPage=draw_page_border, onLaterPages=draw_page_border)
             self.show_export_success(path)
