@@ -298,6 +298,21 @@ class Database:
         incident_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(incidents)").fetchall()}
         if "investigation_details" not in incident_cols:
             self.conn.execute("ALTER TABLE incidents ADD COLUMN investigation_details TEXT DEFAULT ''")
+        # Incident/RCA extensions are additive only; existing data remains intact.
+        incident_extra = {
+            "people_details": "TEXT DEFAULT ''",
+            "equipment_details": "TEXT DEFAULT ''",
+            "environmental_category": "TEXT DEFAULT ''",
+            "environmental_quantity": "TEXT DEFAULT ''",
+            "property_name": "TEXT DEFAULT ''",
+            "property_damage_cost": "TEXT DEFAULT ''",
+            "organization": "TEXT DEFAULT ''",
+            "procedure_reference": "TEXT DEFAULT ''",
+            "report_reference": "TEXT DEFAULT ''"
+        }
+        for col, definition in incident_extra.items():
+            if col not in incident_cols:
+                self.conn.execute(f"ALTER TABLE incidents ADD COLUMN {col} {definition}")
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -797,64 +812,87 @@ def generate_incident_docx(incident_id, path):
     row = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,))
     if not row:
         raise ValueError("Incident record not found.")
-
     doc = Document()
     add_docx_header(doc)
     add_docx_title(doc, "ACCIDENT / INCIDENT INVESTIGATION REPORT", row["number"])
-
-    add_docx_kv_table(doc, [
-        ("Company", company_name()), ("Project", row["project"]),
+    pairs = [
+        ("Company", row["company"] or company_name()), ("Project", row["project"]),
         ("Incident Date", row["incident_date"]), ("Incident Time", row["incident_time"]),
         ("Location", row["location"]), ("Department", row["department"]),
         ("Activity", row["activity"]), ("Incident Type", row["incident_type"]),
-        ("Person Involved", row["person_involved"]), ("Employee ID", row["employee_id"]),
-        ("Designation", row["designation"]), ("Supervisor", row["supervisor"]),
-        ("Witnesses", row["witnesses"]), ("Equipment", row["equipment"]),
-        ("Investigation Method", row["investigation_method"]),
-    ])
-
+        ("Investigation Method", row["investigation_method"]), ("Status", row["status"]),
+        ("Organization", row["organization"]), ("Procedure / Reference", row["procedure_reference"]),
+        ("Report / Reference No.", row["report_reference"]),
+    ]
+    add_docx_kv_table(doc, pairs)
     details = {}
-    try:
-        details = json.loads(safe(row["investigation_details"]) or "{}")
-    except Exception:
-        details = {}
-
-    sections = [
-        ("Investigation Procedure / Method Details", details.get("summary", "")),
+    try: details = json.loads(safe(row["investigation_details"]) or "{}")
+    except Exception: details = {}
+    people=[]; equipment=[]
+    try: people=json.loads(safe(row["people_details"]) or "[]")
+    except Exception: pass
+    try: equipment=json.loads(safe(row["equipment_details"]) or "[]")
+    except Exception: pass
+    if people:
+        doc.add_heading("People Involved", level=2)
+        t=doc.add_table(rows=1, cols=3)
+        for i,h in enumerate(["Person Involved","Designation","ID"]): t.rows[0].cells[i].text=h
+        for x in people:
+            c=t.add_row().cells; c[0].text=xml_safe(x.get("name","")); c[1].text=xml_safe(x.get("designation","")); c[2].text=xml_safe(x.get("id",""))
+        style_docx_table(t)
+    if equipment:
+        doc.add_heading("Equipment", level=2)
+        t=doc.add_table(rows=1, cols=3)
+        for i,h in enumerate(["Equipment","ID","Specification"]): t.rows[0].cells[i].text=h
+        for x in equipment:
+            c=t.add_row().cells; c[0].text=xml_safe(x.get("name","")); c[1].text=xml_safe(x.get("id","")); c[2].text=xml_safe(x.get("specification",""))
+        style_docx_table(t)
+    env = f'{safe(row["environmental_category"])} {safe(row["environmental_quantity"])}'.strip()
+    if env:
+        doc.add_heading("Environmental Information", level=2); doc.add_paragraph(xml_safe(env))
+    prop = f'{safe(row["property_name"])} {safe(row["property_damage_cost"])}'.strip()
+    if prop:
+        doc.add_heading("Property Damage", level=2); doc.add_paragraph(xml_safe(prop))
+    for heading, value in [
         ("Incident Description", row["description"]), ("Immediate Action", row["immediate_action"]),
-        ("Actual Consequences", row["consequences"]), ("Potential Consequences", row["potential_consequences"]),
-    ]
+        ("Actual Consequences", row["consequences"]),
+    ]:
+        if value:
+            doc.add_heading(heading, level=2); doc.add_paragraph(xml_safe(value))
+    # Method-specific investigation procedure.
     for key, value in details.items():
-        if key != "summary" and value:
-            sections.append((key.replace("_", " ").title(), value))
-    sections += [
-        ("Direct Cause", row["direct_cause"]), ("Contributing Factors", row["contributing_factors"]),
-        ("Root Cause", row["root_cause"]), ("Corrective Action", row["corrective_action"]),
-        ("Preventive Action", row["preventive_action"]),
-    ]
-    seen=set()
-    for heading, value in sections:
-        if heading in seen:
-            continue
-        seen.add(heading)
-        doc.add_heading(xml_safe(heading), level=2)
-        doc.add_paragraph(xml_safe(value) or "N/A")
-
+        if key in {"summary", "direct_causes", "contributing_factors_list", "root_causes_list", "corrective_actions"}: continue
+        if value:
+            doc.add_heading(key.replace("_", " ").title(), level=2); doc.add_paragraph(xml_safe(value))
+    # Multiple RCA causes.
+    for title, key, fallback in [
+        ("Direct Cause", "direct_causes", row["direct_cause"]),
+        ("Contributing Factors", "contributing_factors_list", row["contributing_factors"]),
+        ("Root Cause", "root_causes_list", row["root_cause"]),
+    ]:
+        vals=details.get(key, [])
+        if not isinstance(vals,list): vals=[vals] if vals else []
+        if not vals and fallback: vals=[fallback]
+        doc.add_heading(title, level=2)
+        for i,v in enumerate(vals,1): doc.add_paragraph(f"{i}. {xml_safe(v)}")
+    # 5 Why remains available for that method.
     if row["investigation_method"] == "5 Why Analysis" or any(row[f"why{i}"] for i in range(1,6)):
         doc.add_heading("5 Why Analysis", level=2)
-        why_table = doc.add_table(rows=1, cols=2)
-        why_table.rows[0].cells[0].text = "Step"
-        why_table.rows[0].cells[1].text = "Analysis"
-        for i in range(1, 6):
-            cells = why_table.add_row().cells
-            cells[0].text = f"Why {i}"
-            cells[1].text = xml_safe(row[f"why{i}"]) or "N/A"
+        why_table = doc.add_table(rows=1, cols=2); why_table.rows[0].cells[0].text="Step"; why_table.rows[0].cells[1].text="Analysis"
+        for i in range(1,6):
+            cells=why_table.add_row().cells; cells[0].text=f"Why {i}"; cells[1].text=xml_safe(row[f"why{i}"]) or "N/A"
         style_docx_table(why_table)
-
+    actions=details.get("corrective_actions", [])
+    if isinstance(actions,list) and actions:
+        doc.add_heading("Corrective Action Plan", level=2)
+        t=doc.add_table(rows=1, cols=5)
+        for i,h in enumerate(["Action","Responsible","Target Date","Status","Closeout Evidence"]): t.rows[0].cells[i].text=h
+        for a in actions:
+            c=t.add_row().cells
+            c[0].text=xml_safe(a.get("action","")); c[1].text=xml_safe(a.get("responsible","")); c[2].text=xml_safe(a.get("target_date","")); c[3].text=xml_safe(a.get("status","Open")); c[4].text=xml_safe("; ".join(a.get("attachments",[])) or "None")
+        style_docx_table(t)
     add_docx_attachments(doc, attachment_rows("incident_attachments", incident_id))
-    add_docx_signatures(doc)
-    add_docx_footer(doc)
-    save_docx_validated(doc, path)
+    add_docx_signatures(doc); add_docx_footer(doc); save_docx_validated(doc, path)
 
 
 OBSERVATION_EXPORT_FIELDS = [
@@ -975,6 +1013,9 @@ def generate_observation_docx(path, record_ids=None):
     ptitle.alignment=WD_ALIGN_PARAGRAPH.CENTER
     rr=ptitle.add_run("HSE OBSERVATION / INSPECTION REPORT")
     rr.bold=True; rr.font.size=Pt(12)
+    proj_line=doc.add_paragraph(f"Company: {xml_safe(company_name())}    Project: {xml_safe(db.setting('project_name', ''))}")
+    proj_line.alignment=WD_ALIGN_PARAGRAPH.CENTER
+    for r in proj_line.runs: r.font.size=Pt(8); r.bold=True
     pg=doc.add_paragraph(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     pg.alignment=WD_ALIGN_PARAGRAPH.RIGHT
     pg.paragraph_format.space_after=Pt(2)
@@ -2077,7 +2118,7 @@ class MainWindow(QMainWindow):
             logo.setPixmap(QPixmap(logo_path).scaled(70,55,Qt.AspectRatioMode.KeepAspectRatio,Qt.TransformationMode.SmoothTransformation))
         banner.addWidget(logo); banner.addWidget(QLabel(f"<b>{safe(company_name())}</b><br>Accident / Incident Investigation Register"),1); layout.addLayout(banner)
         toolbar=QHBoxLayout()
-        buttons=[("+ New Incident", None),("Delete Selected",None),("Export CSV",lambda:self.export_csv("incidents")),( "Export Excel",lambda:self.export_excel("incidents")),( "Export PDF",lambda:self.export_pdf("incidents")),( "Export Word",lambda:self.export_docx("incidents")),( "Professional Report",None)]
+        buttons=[("+ New Incident", None),("Edit Selected",None),("Delete Selected",None),("Export CSV",lambda:self.export_csv("incidents")),( "Export Excel",lambda:self.export_excel("incidents")),( "Export PDF",lambda:self.export_pdf("incidents")),( "Export Word",lambda:self.export_docx("incidents")),( "Professional Report",None)]
         btns={}
         for text,fn in buttons:
             b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
@@ -2099,82 +2140,170 @@ class MainWindow(QMainWindow):
             try: generate_incident_docx(incident_id,path); self.show_export_success(path)
             except Exception as e: logging.exception("Incident Word report failed"); QMessageBox.critical(self,"Report Error",str(e))
         btns["+ New Incident"].clicked.connect(lambda:self.incident_form(load))
+        btns["Edit Selected"].clicked.connect(lambda:self.incident_form(load, self.selected_id(table, "Edit Incident")))
         btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"incidents","incident_attachments","Incident",load))
         btns["Professional Report"].clicked.connect(professional)
         load()
 
 
-    def incident_form(self, refresh):
-        dialog=QDialog(self); dialog.setWindowTitle("New Accident / Incident Investigation"); dialog.resize(1000,900); dialog.setMinimumSize(920,760); outer=QVBoxLayout(dialog)
-        title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
+    def incident_form(self, refresh, incident_id=None):
+        existing = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,)) if incident_id else None
+        if incident_id and not existing: return
+        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1050,950); dialog.setMinimumSize(950,780)
+        outer=QVBoxLayout(dialog); title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
-        def add_edit(name):
-            e=QLineEdit(); edits[name]=e; form.addRow(name.replace("_"," ").title()+":",e); return e
-        for name in ["incident_time","location","project","company","department","activity","person_involved","employee_id","designation","supervisor","witnesses","equipment"]:add_edit(name)
+        def add_edit(name,label=None,value=""):
+            e=QLineEdit(safe(value)); edits[name]=e; form.addRow(label or name.replace("_"," ").title()+":",e); return e
+        for name in ["incident_time","location","project","company","department","activity"]: add_edit(name,value=existing[name] if existing else "")
+        for name in ["supervisor","witnesses"]: add_edit(name,value=existing[name] if existing else "")
         incident_type=QComboBox(); incident_type.addItems(INCIDENT_TYPES); form.addRow("Type of Incident:",incident_type)
-        description=QTextEdit(); description.setMinimumHeight(110); form.addRow("Incident Description:",description)
-        immediate=QTextEdit(); immediate.setMinimumHeight(80); form.addRow("Immediate Action:",immediate)
-        consequences=QTextEdit(); consequences.setMinimumHeight(80); form.addRow("Actual Consequences:",consequences)
-        potential=QTextEdit(); potential.setMinimumHeight(80); form.addRow("Potential Consequences:",potential)
+        description=QTextEdit(); description.setMinimumHeight(100); description.setPlainText(safe(existing["description"]) if existing else ""); form.addRow("Incident Description:",description)
+        immediate=QTextEdit(); immediate.setMinimumHeight(70); immediate.setPlainText(safe(existing["immediate_action"]) if existing else ""); form.addRow("Immediate Action:",immediate)
+        consequences=QTextEdit(); consequences.setMinimumHeight(70); consequences.setPlainText(safe(existing["consequences"]) if existing else ""); form.addRow("Actual Consequences:",consequences)
+        # People involved
+        people_box=QGroupBox("People Involved"); people_layout=QVBoxLayout(people_box); people_rows=[]
+        def add_person(data=None):
+            roww=QHBoxLayout(); n=QLineEdit(safe((data or {}).get("name",""))); d=QLineEdit(safe((data or {}).get("designation",""))); i=QLineEdit(safe((data or {}).get("id",""))); rem=QPushButton("Remove")
+            n.setPlaceholderText("Person involved"); d.setPlaceholderText("Designation"); i.setPlaceholderText("ID"); roww.addWidget(n,2); roww.addWidget(d,2); roww.addWidget(i,1); roww.addWidget(rem); wrap=QWidget(); wrap.setLayout(roww); people_layout.addWidget(wrap); people_rows.append((wrap,n,d,i)); rem.clicked.connect(lambda: (people_rows.remove(next(x for x in people_rows if x[0] is wrap)), wrap.deleteLater()))
+        addp=QPushButton("+ Add Person"); people_layout.addWidget(addp); addp.clicked.connect(lambda:add_person())
+        if existing:
+            try:
+                for x in json.loads(safe(existing["people_details"]) or "[]"): add_person(x)
+            except Exception: pass
+        if not people_rows: add_person()
+        form.addRow(people_box)
+        # Equipment
+        equipment_box=QGroupBox("Equipment"); equipment_layout=QVBoxLayout(equipment_box); equipment_rows=[]
+        def add_equipment(data=None):
+            roww=QHBoxLayout(); n=QLineEdit(safe((data or {}).get("name", ""))); i=QLineEdit(safe((data or {}).get("id", ""))); sp=QLineEdit(safe((data or {}).get("specification", ""))); rem=QPushButton("Remove")
+            n.setPlaceholderText("Equipment"); i.setPlaceholderText("ID"); sp.setPlaceholderText("Specification"); roww.addWidget(n,2); roww.addWidget(i,1); roww.addWidget(sp,3); roww.addWidget(rem); wrap=QWidget(); wrap.setLayout(roww); equipment_layout.addWidget(wrap); equipment_rows.append((wrap,n,i,sp)); rem.clicked.connect(lambda: (equipment_rows.remove(next(x for x in equipment_rows if x[0] is wrap)), wrap.deleteLater()))
+        adde=QPushButton("+ Add Equipment"); equipment_layout.addWidget(adde); adde.clicked.connect(lambda:add_equipment())
+        if existing:
+            try:
+                for x in json.loads(safe(existing["equipment_details"]) or "[]"): add_equipment(x)
+            except Exception: pass
+        if not equipment_rows: add_equipment()
+        form.addRow(equipment_box)
+        # Environmental / property / organization information
+        env_cat=QComboBox(); env_cat.addItems(["", "Spillage", "Oil Spill", "Chemical Spill", "Water Discharge", "Air Emission", "Waste", "Soil Contamination", "Noise", "Dust", "Other"]); env_cat.setCurrentText(safe(existing["environmental_category"]) if existing else "")
+        env_qty=QLineEdit(safe(existing["environmental_quantity"]) if existing else ""); env_wrap=QHBoxLayout(); env_wrap.addWidget(env_cat); env_wrap.addWidget(env_qty); envw=QWidget(); envw.setLayout(env_wrap); form.addRow("Environmental Category / Quantity:",envw)
+        add_edit("property_name","Property / Asset Name",existing["property_name"] if existing else ""); add_edit("property_damage_cost","Cost of Damage",existing["property_damage_cost"] if existing else "")
+        add_edit("organization","Organisation",existing["organization"] if existing else ""); add_edit("procedure_reference","Procedure / Reference",existing["procedure_reference"] if existing else ""); add_edit("report_reference","Report / Reference No.",existing["report_reference"] if existing else "")
         method=QComboBox(); method.addItems(INVESTIGATION_METHODS); form.addRow("Investigation Method:",method)
-
-        procedure_box=QGroupBox("Investigation Procedure"); procedure_layout=QVBoxLayout(procedure_box); procedure_form=QFormLayout(); procedure_layout.addLayout(procedure_form); form.addRow(procedure_box)
-        proc_widgets=[]
+        if existing: method.setCurrentText(safe(existing["investigation_method"]))
+        procedure_box=QGroupBox("Investigation Procedure"); procedure_layout=QVBoxLayout(procedure_box); procedure_form=QFormLayout(); procedure_layout.addLayout(procedure_form); form.addRow(procedure_box); proc_widgets=[]
         def clear_proc():
             while procedure_form.count():
                 item=procedure_form.takeAt(0); w=item.widget()
                 if w:w.deleteLater()
             proc_widgets.clear()
-        def add_proc(label, name, multi=True):
-            w=QTextEdit() if multi else QLineEdit();
-            if multi:w.setMinimumHeight(70)
+        def add_proc(label,name,multi=True,value=""):
+            w=QTextEdit() if multi else QLineEdit(); w.setPlainText(safe(value)) if multi else w.setText(safe(value));
+            if multi:w.setMinimumHeight(65)
             proc_widgets.append((name,w)); procedure_form.addRow(label+":",w); return w
         def build_proc(_=None):
-            clear_proc(); m=method.currentText()
+            clear_proc(); m=method.currentText(); old={}
+            try: old=json.loads(safe(existing["investigation_details"]) or "{}") if existing else {}
+            except Exception: old={}
             if m=="ICAM":
-                add_proc("Timeline / Event Sequence","timeline"); add_proc("Failed or Missing Defenses / Barriers","failed_defenses"); add_proc("Immediate Causes","immediate_causes"); add_proc("Contributing Conditions","contributing_conditions"); add_proc("Organizational Factors","organizational_factors"); add_proc("Root Cause","root_cause_analysis")
+                for lab,key in [("Timeline / Event Sequence","timeline"),("Failed or Missing Defenses / Barriers","failed_defenses"),("Immediate Causes","immediate_causes"),("Contributing Conditions","contributing_conditions"),("Organizational Factors","organizational_factors"),("Root Cause","root_cause_analysis")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="5 Why Analysis":
-                for i in range(1,6): add_proc(f"Why {i}",f"why{i}",multi=False)
+                for i in range(1,6): add_proc(f"Why {i}",f"why{i}",False,old.get(f"why{i}",""))
             elif m=="Fishbone / Ishikawa":
-                add_proc("People / Man","people"); add_proc("Machine / Equipment","machine"); add_proc("Method","method"); add_proc("Material","material"); add_proc("Environment","environment"); add_proc("Management / Measurement","management")
+                for lab,key in [("People / Man","people"),("Machine / Equipment","machine"),("Method","method"),("Material","material"),("Environment","environment"),("Management / Measurement","management")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="Barrier Analysis":
-                add_proc("Hazard / Threat","hazard"); add_proc("Top Event","top_event"); add_proc("Required Barriers","required_barriers"); add_proc("Failed / Missing Barriers","failed_barriers"); add_proc("Recovery / Mitigation","mitigation")
+                for lab,key in [("Hazard / Threat","hazard"),("Top Event","top_event"),("Required Barriers","required_barriers"),("Failed / Missing Barriers","failed_barriers"),("Recovery / Mitigation","mitigation")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="Bow-Tie Analysis":
-                add_proc("Threats","threats"); add_proc("Top Event","top_event"); add_proc("Preventive Barriers","preventive_barriers"); add_proc("Consequences","consequences"); add_proc("Mitigative Barriers","mitigative_barriers")
+                for lab,key in [("Threats","threats"),("Top Event","top_event"),("Preventive Barriers","preventive_barriers"),("Consequences","consequences"),("Mitigative Barriers","mitigative_barriers")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="Fault Tree Analysis":
-                add_proc("Top Event","top_event"); add_proc("Intermediate Events","intermediate_events"); add_proc("Basic Events","basic_events"); add_proc("Logic / Gate Analysis","logic_analysis")
+                for lab,key in [("Top Event","top_event"),("Intermediate Events","intermediate_events"),("Basic Events","basic_events"),("Logic / Gate Analysis","logic_analysis")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="Causal Tree":
-                add_proc("Event","event"); add_proc("Causal Sequence","causal_sequence"); add_proc("Direct Causes","direct_causes"); add_proc("Contributing Causes","contributing_causes"); add_proc("Root Causes","root_causes")
-            else:
-                add_proc("Investigation Procedure / Notes","summary")
+                for lab,key in [("Event","event"),("Causal Sequence","causal_sequence"),("Direct Causes","direct_causes_method"),("Contributing Causes","contributing_causes"),("Root Causes","root_causes_method")]: add_proc(lab,key,value=old.get(key,""))
+            else: add_proc("Investigation Procedure / Notes","summary",value=old.get("summary",""))
         method.currentTextChanged.connect(build_proc); build_proc()
-
-        direct=QTextEdit(); direct.setMinimumHeight(80); form.addRow("Direct Cause:",direct)
-        contributing=QTextEdit(); contributing.setMinimumHeight(80); form.addRow("Contributing Factors:",contributing)
-        root=QTextEdit(); root.setMinimumHeight(80); form.addRow("Root Cause:",root)
-        corrective=QTextEdit(); corrective.setMinimumHeight(80); form.addRow("Corrective Action:",corrective)
-        preventive=QTextEdit(); preventive.setMinimumHeight(80); form.addRow("Preventive Action:",preventive)
-        attachment_paths=[]; attachment_label=QLabel("No evidence files selected."); attachment_label.setWordWrap(True); attach_button=QPushButton("Attach Evidence Files"); attach_button.setMinimumHeight(36)
+        # Multiple RCA fields
+        def multi_cause_group(title,key):
+            box=QGroupBox(title); lay=QVBoxLayout(box); rows=[]
+            def add(value=""):
+                h=QHBoxLayout(); e=QLineEdit(safe(value)); e.setPlaceholderText(title); rm=QPushButton("Remove"); h.addWidget(e,1); h.addWidget(rm); wrap=QWidget(); wrap.setLayout(h); lay.addWidget(wrap); rows.append((wrap,e)); rm.clicked.connect(lambda: (rows.remove(next(x for x in rows if x[0] is wrap)),wrap.deleteLater()))
+            plus=QPushButton("+ Add"); lay.addWidget(plus); plus.clicked.connect(lambda:add());
+            vals=[]
+            if existing:
+                try: vals=json.loads(safe(existing["investigation_details"]) or "{}").get(key,[])
+                except Exception: vals=[]
+            if isinstance(vals,str): vals=[vals]
+            for v in vals: add(v)
+            if not rows: add()
+            form.addRow(box); return rows
+        direct_rows=multi_cause_group("Direct Cause", "direct_causes")
+        contrib_rows=multi_cause_group("Contributing Factors", "contributing_factors_list")
+        root_rows=multi_cause_group("Root Cause", "root_causes_list")
+        # Corrective action plan
+        ca_box=QGroupBox("Corrective Action Plan"); ca_lay=QVBoxLayout(ca_box); ca_rows=[]
+        def add_ca(data=None):
+            data=data or {}; h=QHBoxLayout(); action=QLineEdit(safe(data.get("action",""))); resp=QLineEdit(safe(data.get("responsible",""))); target=QLineEdit(safe(data.get("target_date",""))); status=QComboBox(); status.addItems(["Open","Closed"]); status.setCurrentText(safe(data.get("status","Open")) or "Open"); attach=[]; lab=QLabel("No closeout evidence"); attach_btn=QPushButton("Attach"); rem=QPushButton("Remove")
+            action.setPlaceholderText("Action"); resp.setPlaceholderText("Responsible Person"); target.setPlaceholderText("Target Date");
+            h.addWidget(action,3); h.addWidget(resp,2); h.addWidget(target,1); h.addWidget(status,1); h.addWidget(attach_btn); h.addWidget(rem); wrap=QWidget(); wrap.setLayout(h); ca_lay.addWidget(wrap); h2=QHBoxLayout(); h2.addWidget(lab); wrap2=QWidget(); wrap2.setLayout(h2); ca_lay.addWidget(wrap2); ca_rows.append((wrap,action,resp,target,status,attach,lab))
+            attach_btn.clicked.connect(lambda: choose_ca_files(attach,lab))
+            rem.clicked.connect(lambda: remove_ca(wrap,wrap2))
+        def choose_ca_files(store,lab):
+            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Closeout Evidence","","Evidence Files (*)")
+            if paths: store.clear(); store.extend(paths); lab.setText("; ".join(Path(x).name for x in paths))
+        def remove_ca(wrap,wrap2):
+            item=next((x for x in ca_rows if x[0] is wrap),None)
+            if item: ca_rows.remove(item); wrap.deleteLater(); wrap2.deleteLater()
+        plus_ca=QPushButton("+ Add Corrective Action"); ca_lay.addWidget(plus_ca); plus_ca.clicked.connect(lambda:add_ca())
+        old_actions=[]
+        if existing:
+            try: old_actions=json.loads(safe(existing["investigation_details"]) or "{}").get("corrective_actions",[])
+            except Exception: old_actions=[]
+        for a in old_actions: add_ca(a)
+        if not ca_rows: add_ca()
+        form.addRow(ca_box)
+        status=QComboBox(); status.addItems(["Draft","Open","Closed"]); status.setCurrentText(safe(existing["status"]) if existing else "Draft"); form.addRow("Investigation Status:",status)
+        attachment_paths=[]; attachment_label=QLabel("No evidence files selected."); attachment_label.setWordWrap(True); attach_button=QPushButton("Attach Investigation Evidence")
         def choose_files():
-            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Investigation Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Investigation Evidence","","Evidence Files (*)")
             if paths: attachment_paths.clear(); attachment_paths.extend(paths); attachment_label.setText("\n".join(Path(p).name for p in paths))
         attach_button.clicked.connect(choose_files); form.addRow("Evidence / Attachments:",attach_button); form.addRow("Selected Files:",attachment_label)
         scroll.setWidget(content); outer.addWidget(scroll,1)
-        buttons=QDialogButtonBox(); save_button=buttons.addButton("Save Investigation",QDialogButtonBox.ButtonRole.AcceptRole); cancel_button=buttons.addButton("Cancel",QDialogButtonBox.ButtonRole.RejectRole); save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40); outer.addWidget(buttons); cancel_button.clicked.connect(dialog.reject)
-        def save():
+        buttons=QDialogButtonBox(); save_draft=buttons.addButton("Save Draft",QDialogButtonBox.ButtonRole.AcceptRole); save_final=buttons.addButton("Save Investigation",QDialogButtonBox.ButtonRole.AcceptRole); cancel=buttons.addButton("Cancel",QDialogButtonBox.ButtonRole.RejectRole); outer.addWidget(buttons); cancel.clicked.connect(dialog.reject)
+        def collect_rows(rows): return [e.text().strip() for _,e in rows if e.text().strip()]
+        def save(mode):
             if not edits["location"].text().strip(): QMessageBox.warning(dialog,"Required","Location is required."); return
             try:
-                number=next_number("HSE-INC","incidents")
+                number=safe(existing["number"]) if existing else next_number("HSE-INC","incidents")
                 proc={name:(w.toPlainText() if isinstance(w,QTextEdit) else w.text()) for name,w in proc_widgets}
-                proc["summary"]=f"{method.currentText()} procedure captured in the investigation form."
-                whys=[proc.get(f"why{i}","") for i in range(1,6)]
-                # Preserve existing report fields while also saving the method-specific procedure.
-                db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),edits["person_involved"].text(),edits["employee_id"].text(),edits["designation"].text(),edits["supervisor"].text(),edits["witnesses"].text(),description.toPlainText(),immediate.toPlainText(),consequences.toPlainText(),potential.toPlainText(),edits["equipment"].text(),method.currentText(),*whys,direct.toPlainText(),contributing.toPlainText(),root.toPlainText(),corrective.toPlainText(),preventive.toPlainText(),json.dumps(proc,ensure_ascii=False),datetime.now().isoformat()))
-                row=db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))
-                if row and attachment_paths: copy_attachments(attachment_paths,number,"incident_attachments",row["id"])
+                direct_vals=collect_rows(direct_rows); contrib_vals=collect_rows(contrib_rows); root_vals=collect_rows(root_rows)
+                actions=[]
+                for _,a,r,t,st,att,lab in ca_rows:
+                    if a.text().strip() or r.text().strip() or t.text().strip() or att:
+                        actions.append({"action":a.text().strip(),"responsible":r.text().strip(),"target_date":t.text().strip(),"status":st.currentText(),"attachments":[]})
+                details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
+                people=[{"name":n.text().strip(),"designation":d.text().strip(),"id":i.text().strip()} for _,n,d,i in people_rows if n.text().strip()]
+                equipment=[{"name":n.text().strip(),"id":i.text().strip(),"specification":sp.text().strip()} for _,n,i,sp in equipment_rows if n.text().strip()]
+                primary_corrective="\n".join(f"{i}. {x['action']}" for i,x in enumerate(actions,1))
+                params=(today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),consequences.toPlainText(),"",equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),env_cat.currentText(),env_qty.text(),edits["property_name"].text(),edits["property_damage_cost"].text(),edits["organization"].text(),edits["procedure_reference"].text(),edits["report_reference"].text(),mode,datetime.now().isoformat())
+                if existing:
+                    db.execute("""UPDATE incidents SET incident_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,person_involved=?,employee_id=?,designation=?,supervisor=?,witnesses=?,description=?,immediate_action=?,consequences=?,potential_consequences=?,equipment=?,investigation_method=?,why1=?,why2=?,why3=?,why4=?,why5=?,direct_cause=?,contributing_factors=?,root_cause=?,corrective_action=?,preventive_action=?,investigation_details=?,people_details=?,equipment_details=?,environmental_category=?,environmental_quantity=?,property_name=?,property_damage_cost=?,organization=?,procedure_reference=?,report_reference=?,status=?,created_at=? WHERE id=?""",params+(incident_id,))
+                else:
+                    db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
+                rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
+                for a in attachment_paths: copy_attachments([a],number,"incident_attachments",rid,"Evidence")
+                # Save closeout evidence against the corrective-action plan items.
+                for idx, item in enumerate(ca_rows):
+                    if idx >= len(actions):
+                        continue
+                    files = item[5]
+                    if files:
+                        saved = copy_attachments(files, number, "incident_attachments", rid, "Closeout Evidence")
+                        actions[idx]["attachments"] = [Path(x).name for x in saved]
+                # Persist the final corrective-action attachment names without altering legacy fields.
+                details["corrective_actions"] = actions
+                db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(details, ensure_ascii=False), rid))
                 dialog.accept(); refresh()
             except Exception as e: logging.exception("Incident save failed"); QMessageBox.critical(dialog,"Save Error",f"Unable to save investigation.\n\n{e}")
-        save_button.clicked.connect(save); dialog.exec()
+        save_draft.clicked.connect(lambda:save("Draft")); save_final.clicked.connect(lambda:save("Open")); dialog.exec()
 
     def audits(self):
         w,layout=self.page("Audit Register")
