@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.6"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -160,6 +160,7 @@ class Database:
             incident_id INTEGER NOT NULL,
             file_path TEXT,
             attachment_type TEXT DEFAULT 'Evidence',
+            remark TEXT DEFAULT '',
             FOREIGN KEY(incident_id)
                 REFERENCES incidents(id)
                 ON DELETE CASCADE
@@ -314,6 +315,10 @@ class Database:
         for col, definition in incident_extra.items():
             if col not in incident_cols:
                 self.conn.execute(f"ALTER TABLE incidents ADD COLUMN {col} {definition}")
+        # Add attachment remarks without replacing any existing attachment data.
+        incident_attachment_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(incident_attachments)").fetchall()]
+        if "remark" not in incident_attachment_cols:
+            self.conn.execute("ALTER TABLE incident_attachments ADD COLUMN remark TEXT DEFAULT ''")
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -704,19 +709,33 @@ def style_docx_table(table, header=True, font_size=7):
 
 
 def report_logo_path():
+    """Resolve the logo saved by Settings, including relative/legacy paths."""
     configured=safe(db.setting("company_logo",""))
-    candidates=[Path(configured)] if configured else []
+    candidates=[]
+    if configured:
+        cp=Path(configured)
+        candidates.extend([cp, APP_DIR / cp, ATTACH_DIR / cp.name])
     candidates += sorted(ATTACH_DIR.glob("company_logo.*"))
+    seen=set()
     for p in candidates:
         try:
+            p=Path(p)
+            key=str(p.resolve()) if p.exists() else str(p)
+            if key in seen: continue
+            seen.add(key)
             if p.exists() and p.is_file(): return p
-        except Exception: pass
+        except Exception:
+            pass
     return None
 
 def add_docx_report_header(document,title,kind="REPORT",report_no=""):
     section=document.sections[0]; header=section.header
-    table=header.add_table(rows=1,cols=3,width=Inches(10.3)); table.autofit=False
-    widths=[Inches(1.55),Inches(5.55),Inches(3.2)]
+    usable=(section.page_width-section.left_margin-section.right_margin)/914400.0
+    if usable < 9.0:
+        widths=[Inches(1.20),Inches(4.05),Inches(2.20)]
+    else:
+        widths=[Inches(1.55),Inches(5.55),Inches(3.2)]
+    table=header.add_table(rows=1,cols=3,width=Inches(sum(w.inches for w in widths))); table.autofit=False
     for cell,w in zip(table.rows[0].cells,widths): cell.width=w; cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
     prefix=document_prefix(); report_no=report_no or f"{prefix}-{kind}-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"; doc_no=f"{prefix}-{kind}"; project=db.setting("project_name","")
     left,mid,right=table.rows[0].cells
@@ -794,28 +813,18 @@ def add_docx_attachments(document, rows):
     if not rows:
         document.add_paragraph("No attachments recorded.")
         return
-    table = document.add_table(rows=1, cols=4)
-    hdr = table.rows[0].cells
-    hdr[0].text = "No."
-    hdr[1].text = "File"
-    hdr[2].text = "Type"
-    hdr[3].text = "Stored Location"
-    for i, row in enumerate(rows, 1):
-        cells = table.add_row().cells
-        path = Path(safe(row["file_path"]))
-        cells[0].text = str(i)
-        cells[1].text = path.name
-        cells[2].text = xml_safe(row["attachment_type"])
-        cells[3].text = xml_safe(str(path))
-        try:
-            if path.exists():
-                run = cells[1].paragraphs[0].add_run()
-                run.add_break()
-                run.add_text("File is available in the HSE attachments folder.")
-        except Exception:
-            pass
-    style_docx_table(table)
-
+    for i,row in enumerate(rows,1):
+        path=Path(safe(row["file_path"])); remark=safe(row["remark"]) if "remark" in row.keys() else ""
+        document.add_paragraph(f"{i}. {path.name} | Type: {safe(row['attachment_type'])} | Remark: {remark}")
+        if path.exists() and path.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+            try:
+                p=document.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                p.add_run().add_picture(str(path), width=Inches(5.8))
+            except Exception:
+                pass
+        elif path.exists() and path.suffix.lower()==".pdf":
+            document.add_paragraph("PDF attachment: " + path.name)
+    
 
 def add_docx_signatures(document):
     document.add_paragraph()
@@ -831,65 +840,65 @@ def add_docx_signatures(document):
 def generate_incident_docx(incident_id, path):
     row=db.fetchone("SELECT * FROM incidents WHERE id=?",(incident_id,))
     if not row: raise ValueError("Incident record not found.")
-    doc=Document(); set_docx_landscape(doc)
+    doc=Document()
+    sec=doc.sections[0]
+    sec.orientation=WD_ORIENT.PORTRAIT
+    sec.page_width=Inches(8.27); sec.page_height=Inches(11.69)
+    sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35); sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35)
     add_docx_report_header(doc,"ACCIDENT / INCIDENT INVESTIGATION REPORT","INC",row["number"])
     title=safe(row["incident_title"]) if "incident_title" in row.keys() else ""
-    add_docx_kv_table(doc,[("Incident Title",title),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),("Company",row["company"] or company_name()),("Project",row["project"]),("Location",row["location"]),("Department",row["department"]),("Activity",row["activity"]),("Incident Type",row["incident_type"]),("Investigation Method",row["investigation_method"]),("Status",row["status"]),("Organisation",row["organization"]),("Report / Reference No.",row["report_reference"])])
+    add_docx_kv_table(doc,[
+        ("Incident Title",title),("Incident Date",row["incident_date"]),("Incident Time",row["incident_time"]),
+        ("Company",row["company"] or company_name()),("Project",row["project"]),("Location",row["location"]),
+        ("Department",row["department"]),("Activity",row["activity"]),("Incident Type",row["incident_type"]),
+        ("Investigation Method",row["investigation_method"]),("Status",row["status"]),
+        ("Organisation",row["organization"]),("Report / Reference No.",row["report_reference"])
+    ])
     try: details=json.loads(safe(row["investigation_details"]) or "{}")
     except Exception: details={}
     def j(col):
         try:return json.loads(safe(row[col]) or "[]")
         except Exception:return []
-    people=j("people_details"); equipment=j("equipment_details")
-    if people:
-        doc.add_heading("People Involved",2); t=doc.add_table(rows=1,cols=4)
-        for i,h in enumerate(["Person Involved","Role","Designation","ID"]): t.rows[0].cells[i].text=h
-        for x in people:
+    def section_table(title, headers, data):
+        if not data:return
+        doc.add_heading(title,2); t=doc.add_table(rows=1,cols=len(headers))
+        for i,h in enumerate(headers): t.rows[0].cells[i].text=h
+        for vals in data:
             c=t.add_row().cells
-            for i,v in enumerate([x.get("name",""),x.get("role",""),x.get("designation",""),x.get("id","")]): c[i].text=xml_safe(v)
-        style_docx_table(t)
-    if equipment:
-        doc.add_heading("Equipment",2); t=doc.add_table(rows=1,cols=3)
-        for i,h in enumerate(["Equipment","ID","Specification"]): t.rows[0].cells[i].text=h
-        for x in equipment:
-            c=t.add_row().cells; c[0].text=xml_safe(x.get("name","")); c[1].text=xml_safe(x.get("id","")); c[2].text=xml_safe(x.get("specification",""))
-        style_docx_table(t)
+            for i,v in enumerate(vals): c[i].text=xml_safe(v)
+        style_docx_table(t,font_size=8)
+    people=j("people_details"); equipment=j("equipment_details")
+    section_table("People Involved",["Person Involved","Role","Designation","ID"],[[x.get("name",""),x.get("role",""),x.get("designation",""),x.get("id","")] for x in people])
+    section_table("Equipment",["Equipment","ID","Specification"],[[x.get("name",""),x.get("id",""),x.get("specification","")] for x in equipment])
     for key,titleh,headers in [("environmental_items","Environmental Information",["Category","Quantity / Unit"]),("property_items","Property / Asset",["Property / Asset Name","Cost of Damage"]),("procedure_items","Procedure / Reference",["Reference","Details"])]:
         items=details.get(key,[]) or []
-        if items:
-            doc.add_heading(titleh,2); t=doc.add_table(rows=1,cols=2); t.rows[0].cells[0].text=headers[0]; t.rows[0].cells[1].text=headers[1]
-            for x in items:
-                c=t.add_row().cells
-                if key=="environmental_items": a,b=x.get("category",""),x.get("quantity","")
-                elif key=="property_items": a,b=x.get("name",""),x.get("cost","")
-                else: a,b=x.get("reference",""),x.get("details","")
-                c[0].text=xml_safe(a); c[1].text=xml_safe(b)
-            style_docx_table(t)
+        vals=[]
+        for x in items:
+            if key=="environmental_items": vals.append([x.get("category",""),x.get("quantity","")])
+            elif key=="property_items": vals.append([x.get("name",""),x.get("cost","")])
+            else: vals.append([x.get("reference",""),x.get("details","")])
+        section_table(titleh,headers,vals)
     for h,v in [("Incident Description",row["description"]),("Immediate Action",row["immediate_action"])]:
         if v: doc.add_heading(h,2); doc.add_paragraph(xml_safe(v))
-    for key,v in details.items():
-        if key in {"summary","direct_causes","contributing_factors_list","root_causes_list","corrective_actions","environmental_items","property_items","procedure_items"}: continue
-        if v: doc.add_heading(key.replace("_"," ").title(),2); doc.add_paragraph(xml_safe(v))
+    # Witness statements, including optional attachment and remark for each statement.
+    witnesses=details.get("witness_statements",[]) or []
+    if witnesses:
+        doc.add_heading("Witness Statements",2)
+        for i,w in enumerate(witnesses,1):
+            doc.add_paragraph(f"Witness {i}: {xml_safe(w.get('name',''))} | Remark: {xml_safe(w.get('remark',''))}")
+            doc.add_paragraph(xml_safe(w.get("statement","")))
+            if w.get("attachment"): doc.add_paragraph("Statement Attachment: "+xml_safe(w.get("attachment")))
     for h,key,fallback in [("Direct Cause","direct_causes",row["direct_cause"]),("Contributing Factors","contributing_factors_list",row["contributing_factors"]),("Root Cause","root_causes_list",row["root_cause"])]:
         vals=details.get(key,[]); vals=vals if isinstance(vals,list) else ([vals] if vals else [])
         if not vals and fallback: vals=[fallback]
         doc.add_heading(h,2)
-        if vals:
-            for i,v in enumerate(vals,1): doc.add_paragraph(f"{i}. {xml_safe(v)}")
-        else: doc.add_paragraph("No entry recorded.")
+        for i,v in enumerate(vals,1): doc.add_paragraph(f"{i}. {xml_safe(v)}")
     if row["investigation_method"]=="5 Why Analysis" or any(row[f"why{i}"] for i in range(1,6)):
-        doc.add_heading("5 Why Analysis",2); t=doc.add_table(rows=1,cols=2); t.rows[0].cells[0].text="Step"; t.rows[0].cells[1].text="Analysis"
-        for i in range(1,6): c=t.add_row().cells; c[0].text=f"Why {i}"; c[1].text=xml_safe(row[f"why{i}"]) or "N/A"
-        style_docx_table(t)
-    actions=details.get("corrective_actions",[])
-    if isinstance(actions,list) and actions:
-        doc.add_heading("Corrective Action Plan",2); t=doc.add_table(rows=1,cols=5)
-        for i,h in enumerate(["Action","Responsible","Target Date","Status","Closeout Evidence"]): t.rows[0].cells[i].text=h
-        for a in actions:
-            c=t.add_row().cells
-            c[0].text=xml_safe(a.get("action","")); c[1].text=xml_safe(a.get("responsible","")); c[2].text=xml_safe(a.get("target_date","")); c[3].text=xml_safe(a.get("status","Open")); c[4].text=xml_safe("; ".join(a.get("attachments",[])) or "None")
-        style_docx_table(t)
-    add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id)); add_docx_signatures(doc); add_docx_footer(doc); save_docx_validated(doc,path)
+        section_table("5 Why Analysis",["Step","Analysis"],[[f"Why {i}",row[f"why{i}"] or "N/A"] for i in range(1,6)])
+    actions=details.get("corrective_actions",[]) or []
+    section_table("Corrective Action Plan",["Action","Responsible","Target Date","Status","Closeout Evidence"],[[a.get("action",""),a.get("responsible",""),a.get("target_date",""),a.get("status","Open"),"; ".join(a.get("attachments",[])) or "None"] for a in actions])
+    add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id))
+    add_docx_signatures(doc); add_docx_footer(doc); save_docx_validated(doc,path)
 
 
 OBSERVATION_EXPORT_FIELDS = [
@@ -1722,6 +1731,11 @@ class MainWindow(QMainWindow):
             bl.addWidget(label); cards.addWidget(box)
         layout.addLayout(cards)
         layout.addWidget(QLabel(f"<b>Company:</b> {company_name()}    <b>Project:</b> {db.setting('project_name','')}"))
+        selector=QComboBox(); selector.addItems(["HSE Home Dashboard","Inspection Dashboard","Incident Dashboard"]); layout.addWidget(selector)
+        def switch_dashboard(text):
+            if text=="Inspection Dashboard": self.observations()
+            elif text=="Incident Dashboard": self.incidents()
+        selector.currentTextChanged.connect(switch_dashboard)
 
         charts=QHBoxLayout()
         pie=PieChartWidget()
@@ -1767,6 +1781,14 @@ class MainWindow(QMainWindow):
         cat_table.cellDoubleClicked.connect(open_category)
         cat_layout.addWidget(cat_table)
         layout.addWidget(cat_box,1)
+
+        recent_inc=QGroupBox("Recent Incidents"); ril=QVBoxLayout(recent_inc); it=QTableWidget(); it.setColumnCount(5); it.setHorizontalHeaderLabels(["ID / Number","Date","Type","Status","Completion"]); ir=db.fetchall("SELECT id,number,incident_date,incident_type,status,incident_title,description,investigation_method,direct_cause,root_cause FROM incidents ORDER BY id DESC LIMIT 10"); it.setRowCount(len(ir))
+        for rr,x in enumerate(ir):
+            total=10; done=sum(bool(safe(x[k])) for k in ["incident_date","incident_time"] if k in x.keys())
+            done += sum(bool(safe(x[k])) for k in ["location","project","incident_type","description","investigation_method","direct_cause","root_cause"] if k in x.keys())
+            pct=round(done*100/total)
+            for cc,v in enumerate([f"{safe(x['id'])} / {safe(x['number'])}",x['incident_date'],x['incident_type'],x['status'],f"{pct}%"]): it.setItem(rr,cc,QTableWidgetItem(safe(v)))
+        ril.addWidget(it); layout.addWidget(recent_inc)
 
         recent=QGroupBox("Recent Observations")
         recent_layout=QVBoxLayout(recent)
@@ -2114,7 +2136,7 @@ class MainWindow(QMainWindow):
             b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
             if fn:b.clicked.connect(fn)
         layout.addLayout(toolbar)
-        table=QTableWidget(); headers=["ID","Number","Date","Type","Location","Project","Method","Status","Completion","Attachments"]
+        table=QTableWidget(); headers=["ID","Number","Date","Type","Location","Project","Method","Status","Completion","Attachments","Professional Report"]
         table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
         def load():
             rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC"); table.setRowCount(len(rows))
@@ -2123,14 +2145,25 @@ class MainWindow(QMainWindow):
                 
                 total=10; done=sum(bool(safe(row[k])) for k in ["incident_date","incident_time","location","project","incident_type","description","immediate_action","investigation_method","direct_cause","root_cause"])
                 pct=round(done*100/total)
-                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",count]
+                try:
+                    report_details=json.loads(safe(row["investigation_details"]) or "{}")
+                except Exception:
+                    report_details={}
+                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",count,"Available" if report_details.get("professional_report_generated") else "Not Generated"]
                 for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
         def professional():
             incident_id=self.selected_id(table,"Professional Report")
             if incident_id is None:return
             number=table.item(table.currentRow(),1).text(); path,_=QFileDialog.getSaveFileName(self,"Save Investigation Report",f"{number}_Investigation_Report.docx","Word Document (*.docx)")
             if not path:return
-            try: generate_incident_docx(incident_id,path); self.show_export_success(path)
+            try:
+                generate_incident_docx(incident_id,path)
+                rr=db.fetchone("SELECT investigation_details FROM incidents WHERE id=?",(incident_id,))
+                try: details=json.loads(safe(rr["investigation_details"]) or "{}") if rr else {}
+                except Exception: details={}
+                details["professional_report_generated"]=True; details["professional_report_path"]=str(path)
+                db.execute("UPDATE incidents SET investigation_details=? WHERE id=?",(json.dumps(details,ensure_ascii=False),incident_id))
+                self.show_export_success(path); load()
             except Exception as e: logging.exception("Incident Word report failed"); QMessageBox.critical(self,"Report Error",str(e))
         btns["+ New Incident"].clicked.connect(lambda:self.incident_form(load))
         def edit_selected():
@@ -2148,7 +2181,7 @@ class MainWindow(QMainWindow):
     def incident_form(self, refresh, incident_id=None):
         existing = db.fetchone("SELECT * FROM incidents WHERE id=?", (incident_id,)) if incident_id else None
         if incident_id and not existing: return
-        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1050,950); dialog.setMinimumSize(950,780)
+        dialog=QDialog(self); dialog.setWindowTitle("Edit Accident / Incident Investigation" if existing else "New Accident / Incident Investigation"); dialog.resize(1200,850); dialog.setMinimumSize(1100,750)
         outer=QVBoxLayout(dialog); title=QLabel("ACCIDENT / INCIDENT INVESTIGATION"); title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;"); outer.addWidget(title)
         scroll=QScrollArea(); scroll.setWidgetResizable(True); content=QWidget(); form=QFormLayout(content); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow); edits={}
         def add_edit(name,label=None,value=""):
@@ -2184,20 +2217,25 @@ class MainWindow(QMainWindow):
         if not equipment_rows: add_equipment()
         form.addRow(equipment_box)
         # Repeatable incident detail sections
+        ENV_CATEGORIES=["Spillage","Oil Spill","Chemical Spill","Fuel Spill","Diesel Spill","Hydrocarbon Spill","Water Discharge","Sewage Discharge","Air Emission","Dust Emission","Smoke / Fumes","Gas Release","Waste","Hazardous Waste","Non-Hazardous Waste","Soil Contamination","Water Contamination","Noise","Odour","Radiation","Resource Consumption","Energy Use","Water Use","Other"]
         def repeat_section(title, fields, old_key):
             box=QGroupBox(title); lay=QVBoxLayout(box); rows=[]
             def add(data=None):
                 data=data or {}; h=QHBoxLayout(); widgets=[]
-                for key,ph in fields:
-                    w=QLineEdit(safe(data.get(key,""))); w.setPlaceholderText(ph); h.addWidget(w,2); widgets.append(w)
+                for key,label in fields:
+                    if key=="category":
+                        w=QComboBox(); w.addItems(ENV_CATEGORIES); w.setCurrentText(safe(data.get(key,"")))
+                    else:
+                        w=QLineEdit(safe(data.get(key,""))); w.setPlaceholderText(label)
+                    widgets.append(w); h.addWidget(w,3 if key in {"details","name"} else 2)
                 rm=QPushButton("Remove"); h.addWidget(rm); wrap=QWidget(); wrap.setLayout(h); lay.addWidget(wrap); rows.append((wrap,widgets)); rm.clicked.connect(lambda: (rows.remove(next(x for x in rows if x[0] is wrap)),wrap.deleteLater()))
             plus=QPushButton("+ Add"); lay.addWidget(plus); plus.clicked.connect(lambda:add())
-            old=[]
+            vals=[]
             if existing:
-                try: old=json.loads(safe(existing["investigation_details"]) or "{}").get(old_key,[])
-                except Exception: old=[]
-            for x in old: add(x)
-            if not rows:add()
+                try: vals=json.loads(safe(existing["investigation_details"]) or "{}").get(old_key,[])
+                except Exception: vals=[]
+            for v in vals: add(v)
+            if not rows: add()
             form.addRow(box); return rows
         environmental_rows=repeat_section("Environmental",[("category","Category (e.g. Spillage)"),("quantity","Quantity / Unit")],"environmental_items")
         property_rows=repeat_section("Property / Asset",[("name","Property / Asset Name"),("cost","Cost of Damage")],"property_items")
@@ -2275,14 +2313,44 @@ class MainWindow(QMainWindow):
         for a in old_actions: add_ca(a)
         if not ca_rows: add_ca()
         form.addRow(ca_box)
+        # Witness statements: each statement can have its own attachment and remark.
+        witness_box=QGroupBox("Witness Statements"); witness_lay=QVBoxLayout(witness_box); witness_rows=[]
+        def add_witness(data=None):
+            data=data or {}; n=QLineEdit(safe(data.get("name",""))); st=QTextEdit(); st.setFixedHeight(65); st.setPlainText(safe(data.get("statement",""))); rm=QLineEdit(safe(data.get("remark",""))); rm.setPlaceholderText("Remark"); files=[]; lab=QLabel(safe(data.get("attachment","")) or "No attachment"); attach=QPushButton("Attach"); remove=QPushButton("Remove")
+            h=QHBoxLayout(); h.addWidget(n,2); h.addWidget(attach); h.addWidget(remove); wrap=QWidget(); wrap.setLayout(h); witness_lay.addWidget(wrap); witness_lay.addWidget(st); witness_lay.addWidget(rm); witness_lay.addWidget(lab); witness_rows.append((wrap,st,n,rm,files,lab))
+            attach.clicked.connect(lambda: choose_witness(files,lab)); remove.clicked.connect(lambda: remove_witness(wrap,st,rm,lab))
+        def choose_witness(store,lab):
+            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Witness Statement Attachment","","Files (*)")
+            if paths: store.clear(); store.extend(paths); lab.setText("; ".join(Path(x).name for x in paths))
+        def remove_witness(*widgets):
+            for item in list(witness_rows):
+                if item[0] is widgets[0]: witness_rows.remove(item); [x.deleteLater() for x in widgets]
+        plus_w=QPushButton("+ Add Witness Statement"); witness_lay.addWidget(plus_w); plus_w.clicked.connect(lambda:add_witness())
+        if existing:
+            try:
+                for x in json.loads(safe(existing["investigation_details"]) or "{}").get("witness_statements",[]): add_witness(x)
+            except Exception: pass
+        if not witness_rows: add_witness()
+        form.addRow(witness_box)
         status=QComboBox(); status.addItems(["Draft","Open","Closed"]); status.setCurrentText(safe(existing["status"]) if existing else "Draft"); form.addRow("Investigation Status:",status)
-        attachment_paths=[]; attachment_label=QLabel("No evidence files selected."); attachment_label.setWordWrap(True); attach_button=QPushButton("Attach Investigation Evidence")
-        def choose_files():
-            paths,_=QFileDialog.getOpenFileNames(dialog,"Select Investigation Evidence","","Evidence Files (*)")
-            if paths: attachment_paths.clear(); attachment_paths.extend(paths); attachment_label.setText("\n".join(Path(p).name for p in paths))
-        attach_button.clicked.connect(choose_files); form.addRow("Evidence / Attachments:",attach_button); form.addRow("Selected Files:",attachment_label)
+        evidence_box=QGroupBox("Evidence Attachments"); evidence_lay=QVBoxLayout(evidence_box); evidence_rows=[]
+        def add_evidence():
+            h=QHBoxLayout(); file_store=[]; lab=QLabel("No file selected"); remark=QLineEdit(); remark.setPlaceholderText("Remark for this attachment"); choose=QPushButton("Add Attachment"); remove=QPushButton("Remove")
+            h.addWidget(lab,2); h.addWidget(remark,3); h.addWidget(choose); h.addWidget(remove); wrap=QWidget(); wrap.setLayout(h); evidence_lay.addWidget(wrap); evidence_rows.append((wrap,file_store,remark,lab))
+            def pick():
+                paths,_=QFileDialog.getOpenFileNames(dialog,"Select Investigation Evidence","","Evidence Files (*)")
+                if paths: file_store.clear(); file_store.extend(paths); lab.setText("; ".join(Path(x).name for x in paths))
+            choose.clicked.connect(pick); remove.clicked.connect(lambda: remove_evidence(wrap))
+        def remove_evidence(wrap):
+            item=next((x for x in evidence_rows if x[0] is wrap),None)
+            if item: evidence_rows.remove(item); wrap.deleteLater()
+        plus_ev=QPushButton("+ Add Evidence Attachment"); evidence_lay.addWidget(plus_ev); plus_ev.clicked.connect(add_evidence); add_evidence(); form.addRow(evidence_box)
+        # Keep action buttons permanently visible without needing to drag the form.
+        action_bar=QHBoxLayout(); action_bar.addStretch()
+        buttons=QDialogButtonBox(); save_draft=buttons.addButton("Save for Later",QDialogButtonBox.ButtonRole.AcceptRole); save_final=buttons.addButton("Save and Submit",QDialogButtonBox.ButtonRole.AcceptRole); save_exit=buttons.addButton("Save and Exit",QDialogButtonBox.ButtonRole.AcceptRole); cancel=buttons.addButton("Cancel",QDialogButtonBox.ButtonRole.RejectRole)
+        for b in [save_draft,save_final,save_exit,cancel]: b.setMinimumHeight(38); b.setMinimumWidth(125)
+        action_bar.addWidget(buttons); outer.insertLayout(1,action_bar); cancel.clicked.connect(dialog.reject)
         scroll.setWidget(content); outer.addWidget(scroll,1)
-        buttons=QDialogButtonBox(); save_draft=buttons.addButton("Save for Later",QDialogButtonBox.ButtonRole.AcceptRole); save_final=buttons.addButton("Save and Submit",QDialogButtonBox.ButtonRole.AcceptRole); save_exit=buttons.addButton("Save and Exit",QDialogButtonBox.ButtonRole.AcceptRole); cancel=buttons.addButton("Cancel",QDialogButtonBox.ButtonRole.RejectRole); outer.addWidget(buttons); cancel.clicked.connect(dialog.reject)
         def collect_rows(rows): return [e.text().strip() for _,e in rows if e.text().strip()]
         def save(mode):
             if not edits["location"].text().strip(): QMessageBox.warning(dialog,"Required","Location is required."); return
@@ -2295,10 +2363,14 @@ class MainWindow(QMainWindow):
                     if a.text().strip() or r.text().strip() or t.text().strip() or att:
                         actions.append({"action":a.text().strip(),"responsible":r.text().strip(),"target_date":t.text().strip(),"status":st.currentText(),"attachments":[]})
                 details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
-                details["environmental_items"]=[{"category":widgets[0].text().strip(),"quantity":widgets[1].text().strip()} for _,widgets in environmental_rows if any(w.text().strip() for w in widgets)]
+                details["environmental_items"]=[{"category":widgets[0].currentText().strip(),"quantity":widgets[1].text().strip()} for _,widgets in environmental_rows if widgets[0].currentText().strip() or widgets[1].text().strip()]
                 details["property_items"]=[{"name":widgets[0].text().strip(),"cost":widgets[1].text().strip()} for _,widgets in property_rows if any(w.text().strip() for w in widgets)]
                 details["procedure_items"]=[{"reference":widgets[0].text().strip(),"details":widgets[1].text().strip()} for _,widgets in procedure_rows if any(w.text().strip() for w in widgets)]
-                people=[{"name":n.text().strip(),"designation":d.text().strip(),"id":i.text().strip()} for _,n,role,d,i in people_rows if n.text().strip()]
+                details["witness_statements"]=[]
+                for _,st,n,rm,files,lab in witness_rows:
+                    if n.text().strip() or st.toPlainText().strip() or files:
+                        details["witness_statements"].append({"name":n.text().strip(),"statement":st.toPlainText().strip(),"remark":rm.text().strip(),"attachment":""})
+                people=[{"name":n.text().strip(),"role":role.currentText(),"designation":d.text().strip(),"id":i.text().strip()} for _,n,role,d,i in people_rows if n.text().strip()]
                 equipment=[{"name":n.text().strip(),"id":i.text().strip(),"specification":sp.text().strip()} for _,n,i,sp in equipment_rows if n.text().strip()]
                 primary_corrective="\n".join(f"{i}. {x['action']}" for i,x in enumerate(actions,1))
                 params=(today(),edits["incident_time"].text(),edits["location"].text(),edits["project"].text(),edits["company"].text(),edits["department"].text(),edits["activity"].text(),incident_type.currentText(),people[0]["name"] if people else "",people[0]["id"] if people else "",people[0]["designation"] if people else "",edits.get("supervisor",QLineEdit()).text() if "supervisor" in edits else "",edits.get("witnesses",QLineEdit()).text() if "witnesses" in edits else "",description.toPlainText(),immediate.toPlainText(),"", "", equipment[0]["name"] if equipment else "",method.currentText(),*(proc.get(f"why{i}","") for i in range(1,6)),"\n".join(direct_vals),"\n".join(contrib_vals),"\n".join(root_vals),primary_corrective,"",json.dumps(details,ensure_ascii=False),json.dumps(people,ensure_ascii=False),json.dumps(equipment,ensure_ascii=False),"", "", "", "", edits["organization"].text(), "", edits["report_reference"].text(),mode,datetime.now().isoformat())
@@ -2308,7 +2380,19 @@ class MainWindow(QMainWindow):
                     db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
                 rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
                 db.execute("UPDATE incidents SET incident_title=? WHERE id=?", (edits["incident_title"].text().strip(), rid))
-                for a in attachment_paths: copy_attachments([a],number,"incident_attachments",rid,"Evidence")
+                for _,file_store,remark,lab in evidence_rows:
+                    if file_store:
+                        saved=copy_attachments(file_store,number,"incident_attachments",rid,"Evidence")
+                        for saved_path in saved:
+                            db.execute("UPDATE incident_attachments SET remark=? WHERE incident_id=? AND file_path=?",(remark.text().strip(),rid,saved_path))
+                for idx, item in enumerate(witness_rows):
+                    if idx >= len(details["witness_statements"]): continue
+                    files=item[4]
+                    if files:
+                        saved=copy_attachments(files,number,"incident_attachments",rid,"Witness Statement")
+                        details["witness_statements"][idx]["attachment"]="; ".join(Path(x).name for x in saved)
+                        for saved_path in saved:
+                            db.execute("UPDATE incident_attachments SET remark=? WHERE incident_id=? AND file_path=?",(item[3].text().strip(),rid,saved_path))
                 # Save closeout evidence against the corrective-action plan items.
                 for idx, item in enumerate(ca_rows):
                     if idx >= len(actions):
@@ -2908,11 +2992,11 @@ class MainWindow(QMainWindow):
                                       onFirstPage=draw_page_border,onLaterPages=draw_page_border)
                 story=[]
                 report_no=f"{document_prefix()}-OBS-REPORT-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-                logo_path=db.setting("company_logo","")
+                logo_path=report_logo_path()
                 logo_flow=Paragraph(xml_safe(company_name()),styles["Normal"])
                 if logo_path and Path(logo_path).exists():
                     try:
-                        logo_flow=RLImage(logo_path,width=85,height=55,preserveAspectRatio=True)
+                        logo_flow=RLImage(str(logo_path),width=85,height=55,preserveAspectRatio=True)
                     except Exception:
                         logging.exception("Unable to embed company logo in observation PDF header")
                 title_style=styles["Title"]
@@ -3310,7 +3394,7 @@ class MainWindow(QMainWindow):
                 elif not source.exists():
                     QMessageBox.warning(self, "Logo Not Found", "The selected company logo could not be found. The previous saved logo will be kept.")
                     selected = db.setting("company_logo", "")
-            db.set_setting("company_logo", selected)
+            db.set_setting("company_logo", str(Path(selected).resolve()) if selected and Path(selected).exists() else selected)
 
         # All report generators read these settings from the database at export
         # time, so the next Word/Excel/PDF/CSV report immediately uses the new
