@@ -891,15 +891,36 @@ def generate_incident_docx(incident_id, path):
     if row["investigation_method"]=="Fishbone / Ishikawa":
         fish=details.get("fishbone",[]) or []
         doc.add_heading("Fishbone / Ishikawa Analysis",2)
-        section_table("Potential Causes",["Factor","Suggested Cause","Specific Cause / Explanation","Evidence / Finding"],[[x.get("category",""),x.get("cause",""),x.get("detail",""),x.get("evidence","")] for x in fish])
+        # Keep each Fishbone cause attachment beside the exact cause that it supports.
+        if fish:
+            incident_attach_map={Path(safe(a["file_path"])).name:Path(safe(a["file_path"])) for a in attachment_rows("incident_attachments",incident_id)}
+            ft=doc.add_table(rows=1,cols=5)
+            for i,h in enumerate(["Factor","Suggested Cause","Specific Cause / Explanation","Evidence / Finding","Attachment"]): ft.rows[0].cells[i].text=h
+            for x in fish:
+                cells=ft.add_row().cells
+                vals=[x.get("category",""),x.get("cause",""),x.get("detail",""),x.get("evidence","")]
+                for i,v in enumerate(vals): cells[i].text=xml_safe(v)
+                att_names=x.get("attachments",[]) or []
+                if not att_names: cells[4].text="None"
+                else:
+                    cells[4].text=""
+                    for nm in att_names:
+                        fp=incident_attach_map.get(Path(nm).name, ATTACH_DIR / Path(nm).name)
+                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                            try:
+                                pp=cells[4].paragraphs[0] if not cells[4].paragraphs[0].runs else cells[4].add_paragraph()
+                                pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(fp),width=Inches(1.25))
+                                cells[4].add_paragraph(xml_safe(fp.name))
+                            except Exception: cells[4].add_paragraph(xml_safe(fp.name))
+                        else:
+                            cells[4].add_paragraph(xml_safe(fp.name))
+            style_docx_table(ft,font_size=7)
         team=details.get("investigation_team",[]) or []
         section_table("Investigation Team",["Name","Position","Department","Role in Investigation"],[[x.get("name",""),x.get("position",""),x.get("department",""),x.get("role","")] for x in team])
         timeline=details.get("timeline_events",[]) or []
         section_table("Timeline of Events",["Time","Event / What Happened"],[[x.get("time",""),x.get("event","")] for x in timeline])
         if details.get("problem_statement"):
             doc.add_heading("Problem Statement",2); doc.add_paragraph(xml_safe(details.get("problem_statement")))
-        why_vals=[[f"Why {i}",details.get(f"fishbone_why{i}","")] for i in range(1,6) if details.get(f"fishbone_why{i}","")]
-        section_table("5-Why Analysis",["Step","Analysis"],why_vals)
         ver=details.get("root_cause_verification",[]) or []
         section_table("Root Cause Verification",["Potential Cause","Evidence / Finding","Verified?","Responsible"],[[x.get("cause",""),x.get("evidence",""),x.get("verified",""),x.get("responsible","")] for x in ver])
         if details.get("effectiveness_verification"):
@@ -2363,28 +2384,46 @@ class MainWindow(QMainWindow):
                 for cat in fish_options:
                     for item in (saved_fish.get(cat,[]) or []):
                         pass
-                def add_fish_row(category="People", cause="", detail="", evidence=""):
+                fish_headers=QLabel("Factor | Suggested Cause | Specific Cause / Explanation | Evidence / Finding | Attachment")
+                fish_headers.setStyleSheet("font-weight:bold;color:#17365D;")
+                fish_lay.addWidget(fish_headers)
+                fish_rows_box=QVBoxLayout()
+                fish_lay.addLayout(fish_rows_box)
+                # Keep every newly-added Fishbone cause inside this dedicated container.
+                # This prevents rows from being inserted into the following Fishbone sections.
+                def add_fish_row(category="People", cause="", detail="", evidence="", attachments=None):
+                    attachments=list(attachments or [])
                     h=QHBoxLayout(); cat=QComboBox(); cat.addItems(list(fish_options.keys())+["Other"]); cat.setCurrentText(category if category in fish_options else "Other")
                     cause_cb=QComboBox(); cause_cb.setEditable(True); cause_cb.addItems(fish_options.get(cat.currentText(),["Other"])); cause_cb.setCurrentText(cause)
                     detail_e=QLineEdit(detail); detail_e.setPlaceholderText("Specific cause / explanation")
                     evidence_e=QLineEdit(evidence); evidence_e.setPlaceholderText("Evidence / finding")
+                    attach_files=[]; attach_files.extend(attachments)
+                    attach_lab=QLabel("; ".join(Path(x).name for x in attach_files) if attach_files else "No attachment"); attach_lab.setWordWrap(True)
+                    attach=QPushButton("Add Attachment")
                     rm=QPushButton("Remove")
-                    h.addWidget(cat,2); h.addWidget(cause_cb,3); h.addWidget(detail_e,3); h.addWidget(evidence_e,3); h.addWidget(rm)
-                    wrap=QWidget(); wrap.setLayout(h); fish_lay.addWidget(wrap); fish_rows.append((wrap,cat,cause_cb,detail_e,evidence_e))
+                    h.addWidget(cat,2); h.addWidget(cause_cb,3); h.addWidget(detail_e,3); h.addWidget(evidence_e,3); h.addWidget(attach,2); h.addWidget(rm,1)
+                    wrap=QWidget(); wrap.setLayout(h); fish_rows_box.addWidget(wrap); fish_rows.append((wrap,cat,cause_cb,detail_e,evidence_e,attach_files,attach_lab))
+                    # Put the filename label immediately below this cause row.
+                    fish_rows_box.addWidget(attach_lab)
+                    attach_lab.setStyleSheet("color:#555;font-size:11px;padding-left:8px;")
+                    def pick_fish_attachment():
+                        paths,_=QFileDialog.getOpenFileNames(dialog,"Select Fishbone Cause Evidence","","Evidence Files (*)")
+                        if paths:
+                            attach_files.clear(); attach_files.extend(paths); attach_lab.setText("; ".join(Path(x).name for x in attach_files))
+                    attach.clicked.connect(pick_fish_attachment)
                     def refresh_causes(_=None):
                         current=cause_cb.currentText(); cause_cb.blockSignals(True); cause_cb.clear(); cause_cb.addItems(fish_options.get(cat.currentText(),["Other"])); cause_cb.setCurrentText(current); cause_cb.blockSignals(False)
                     cat.currentTextChanged.connect(refresh_causes)
-                    rm.clicked.connect(lambda: remove_fish_row(wrap))
-                def remove_fish_row(wrap):
+                    rm.clicked.connect(lambda: remove_fish_row(wrap,attach_lab))
+                def remove_fish_row(wrap,attach_lab=None):
                     item=next((x for x in fish_rows if x[0] is wrap),None)
-                    if item: fish_rows.remove(item); wrap.deleteLater()
-                fish_headers=QLabel("Factor | Suggested Cause | Specific Cause / Explanation | Evidence / Finding")
-                fish_headers.setStyleSheet("font-weight:bold;color:#17365D;")
-                fish_lay.addWidget(fish_headers)
+                    if item:
+                        fish_rows.remove(item); wrap.deleteLater()
+                        if attach_lab: attach_lab.deleteLater()
                 saved_rows=[]
                 for cat,items in saved_fish.items():
                     for x in items or []:
-                        if isinstance(x,dict): saved_rows.append((cat,x.get("cause",""),x.get("detail",""),x.get("evidence","")))
+                        if isinstance(x,dict): saved_rows.append((cat,x.get("cause",""),x.get("detail",""),x.get("evidence",""),x.get("attachments",[]) or []))
                 if saved_rows:
                     for x in saved_rows: add_fish_row(*x)
                 else:
@@ -2392,9 +2431,9 @@ class MainWindow(QMainWindow):
                 add_fish=QPushButton("+ Add Fishbone Cause")
                 add_fish.setMinimumHeight(36)
                 fish_lay.addWidget(add_fish)
-                # Keep the button bound to the current Fishbone workspace.  The
-                # workspace itself is recreated only when the method changes.
-                add_fish.clicked.connect(add_fish_row)
+                # QAbstractButton.clicked emits a boolean; use a no-argument lambda so
+                # that the signal value cannot be mistaken for the cause category.
+                add_fish.clicked.connect(lambda checked=False: add_fish_row())
                 fish_lay.addWidget(QLabel("Fishbone factors: People, Machine / Equipment, Method, Material, Measurement and Environment. Use Add for additional applicable causes."))
                 # Supporting Fishbone RCA sections from the supplied RCA flow. These are
                 # only shown when Fishbone is selected, so other investigation methods keep
@@ -2423,10 +2462,6 @@ class MainWindow(QMainWindow):
                 for x in (old.get("timeline_events",[]) or []): add_timeline(x)
                 if not timeline_rows: add_timeline()
                 fish_lay.addWidget(timeline_box)
-                why_box=QGroupBox("5-Why Analysis"); why_lay=QFormLayout(why_box); fish_why=[]
-                for i in range(1,6):
-                    w=QLineEdit(safe(old.get(f"fishbone_why{i}", old.get(f"why{i}","")))); fish_why.append(w); why_lay.addRow(f"Why {i}:",w)
-                fish_lay.addWidget(why_box)
                 verify_box=QGroupBox("Root Cause Verification"); verify_lay=QVBoxLayout(verify_box); verify_rows=[]
                 def add_verify(data=None):
                     data=data or {}; h=QHBoxLayout(); cause=QLineEdit(safe(data.get("cause",""))); evidence=QLineEdit(safe(data.get("evidence",""))); verified=QComboBox(); verified.addItems(["Yes","No","Pending"]); verified.setCurrentText(safe(data.get("verified","Pending")) or "Pending"); person=QLineEdit(safe(data.get("responsible",""))); rm=QPushButton("Remove")
@@ -2446,7 +2481,6 @@ class MainWindow(QMainWindow):
                     ("fish_problem_statement", fish_problem),
                     ("fish_investigation_team", team_rows),
                     ("fish_timeline_events", timeline_rows),
-                    ("fish_why_widgets", fish_why),
                     ("fish_root_cause_verification", verify_rows),
                     ("fish_effectiveness_verification", fish_effective),
                     ("fish_lessons_learned", fish_lessons),
@@ -2559,17 +2593,15 @@ class MainWindow(QMainWindow):
                 fishbone_rows_data=[]
                 for name,w in proc_widgets:
                     if name=="fishbone_rows":
-                        for _,cat,cause_cb,detail_e,evidence_e in w:
-                            if cat.currentText().strip() or cause_cb.currentText().strip() or detail_e.text().strip() or evidence_e.text().strip():
-                                fishbone_rows_data.append({"category":cat.currentText().strip(),"cause":cause_cb.currentText().strip(),"detail":detail_e.text().strip(),"evidence":evidence_e.text().strip()})
+                        for _,cat,cause_cb,detail_e,evidence_e,attach_files,attach_lab in w:
+                            if cat.currentText().strip() or cause_cb.currentText().strip() or detail_e.text().strip() or evidence_e.text().strip() or attach_files:
+                                fishbone_rows_data.append({"category":cat.currentText().strip(),"cause":cause_cb.currentText().strip(),"detail":detail_e.text().strip(),"evidence":evidence_e.text().strip(),"attachments":list(attach_files)})
                     elif name=="fish_problem_statement":
                         proc["problem_statement"]=w.toPlainText()
                     elif name=="fish_investigation_team":
                         proc["investigation_team"]=[{"name":n.text().strip(),"position":pos.text().strip(),"department":dep.text().strip(),"role":role.text().strip()} for _,n,pos,dep,role in w if any(z.text().strip() for z in (n,pos,dep,role))]
                     elif name=="fish_timeline_events":
                         proc["timeline_events"]=[{"time":tm.text().strip(),"event":ev.text().strip()} for _,tm,ev in w if tm.text().strip() or ev.text().strip()]
-                    elif name=="fish_why_widgets":
-                        for i,wid in enumerate(w,1): proc[f"fishbone_why{i}"]=wid.text().strip()
                     elif name=="fish_root_cause_verification":
                         proc["root_cause_verification"]=[{"cause":cause.text().strip(),"evidence":evidence.text().strip(),"verified":verified.currentText(),"responsible":person.text().strip()} for _,cause,evidence,verified,person in w if any(z.text().strip() for z in (cause,evidence,person))]
                     elif name=="fish_effectiveness_verification":
@@ -2603,8 +2635,29 @@ class MainWindow(QMainWindow):
                     db.execute("""UPDATE incidents SET incident_date=?,incident_time=?,location=?,project=?,company=?,department=?,activity=?,incident_type=?,person_involved=?,employee_id=?,designation=?,supervisor=?,witnesses=?,description=?,immediate_action=?,consequences=?,potential_consequences=?,equipment=?,investigation_method=?,why1=?,why2=?,why3=?,why4=?,why5=?,direct_cause=?,contributing_factors=?,root_cause=?,corrective_action=?,preventive_action=?,investigation_details=?,people_details=?,equipment_details=?,environmental_category=?,environmental_quantity=?,property_name=?,property_damage_cost=?,organization=?,procedure_reference=?,report_reference=?,status=?,created_at=? WHERE id=?""",params+(incident_id,))
                 else:
                     db.execute("""INSERT INTO incidents (number,incident_date,incident_time,location,project,company,department,activity,incident_type,person_involved,employee_id,designation,supervisor,witnesses,description,immediate_action,consequences,potential_consequences,equipment,investigation_method,why1,why2,why3,why4,why5,direct_cause,contributing_factors,root_cause,corrective_action,preventive_action,investigation_details,people_details,equipment_details,environmental_category,environmental_quantity,property_name,property_damage_cost,organization,procedure_reference,report_reference,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(number,)+params)
-                rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number,))["id"]
+                rid=incident_id or db.fetchone("SELECT id FROM incidents WHERE number=?",(number))["id"]
                 db.execute("UPDATE incidents SET incident_title=? WHERE id=?", (edits["incident_title"].text().strip(), rid))
+                # Save Fishbone cause attachments and replace temporary source paths with
+                # the saved filenames so reports can display the actual evidence.
+                if method.currentText()=="Fishbone / Ishikawa":
+                    for frow in fishbone_rows_data:
+                        srcs=frow.get("attachments",[]) or []
+                        saved_names=[]
+                        new_sources=[]
+                        for src in srcs:
+                            sp=Path(src)
+                            if sp.exists():
+                                new_sources.append(str(sp))
+                            else:
+                                # Existing Fishbone attachments are already stored in the
+                                # incident attachment table; retain their filenames.
+                                saved_names.append(sp.name)
+                        if new_sources:
+                            saved=copy_attachments(new_sources,number,"incident_attachments",rid,"Fishbone Cause")
+                            saved_names.extend(Path(x).name for x in saved)
+                        frow["attachments"]=saved_names
+                    details["fishbone"]=fishbone_rows_data
+                    db.execute("UPDATE incidents SET investigation_details=? WHERE id=?", (json.dumps(details, ensure_ascii=False), rid))
                 for _,file_store,remark,lab in evidence_rows:
                     if file_store:
                         saved=copy_attachments(file_store,number,"incident_attachments",rid,"Evidence")
