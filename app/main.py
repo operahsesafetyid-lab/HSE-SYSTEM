@@ -908,65 +908,42 @@ def generate_incident_docx(incident_id, path):
         def icam_text(title,key):
             v=details.get(key,"")
             if v: add_docx_boxed_section(doc,title,v,8)
-        icam_text("Actual Consequence","icam_actual_consequence")
-        icam_text("Potential Consequence","icam_potential_consequence")
-        icam_text("Initial Incident Classification / Severity","icam_classification")
-        icam_text("Incident Description - Factual Chronological Account","icam_incident_description")
-        icam_text("Immediate Response / Containment","icam_containment")
+        icam_text("Severity", "icam_severity")
+        icam_text("Immediate Response / Containment", "icam_containment")
         def icam_table(title,headers,key):
             vals=details.get(key,[]) or []
             if not vals:return
             doc.add_heading(title,2)
             t=doc.add_table(rows=1,cols=len(headers))
-            for i,h in enumerate(headers):t.rows[0].cells[i].text=h
+            for i,h in enumerate(headers): t.rows[0].cells[i].text=h
             for x in vals:
                 c=t.add_row().cells
-                for i,h in enumerate(headers):
-                    mapping={
-                        "Evidence / Information":"type","Reviewed?":"reviewed","Finding / Information Gap":"finding",
-                        "Name":"name","Position":"position","Department":"department","Investigation Role":"role",
-                        "Date / Time":"date_time","Event / Action":"event","Person Involved":"person","Relevant Condition":"condition","Evidence / Source":"evidence",
-                        "Sequence / Event":"sequence","Type":"type","Event / Condition / Causal Factor / Failed Control":"type",
-                        "Barrier / Defence":"defence","Status":"status","Cause":"cause","Finding":"finding","Control Gap":"gap",
-                        "Action / Factor":"factor","Category":"category","Influencing Condition":"condition","Contribution to Incident":"contribution",
-                        "Task / Environmental Factor":"factor","Contributed?":"contributed","Condition":"condition","Organisational Factor":"factor","Condition / Systemic Issue":"condition",
-                        "Causal Factor":"factor","ICAM Category":"category","Description":"description",
-                        "Significant Causal Factor":"factor","Why 1":"why1","Why 2":"why2","Why 3":"why3","Why 4":"why4","Why 5":"why5",
-                        "Hazard":"hazard","Existing Control":"existing","Expected Control":"expected","Actual Condition":"actual","Control Failure / Gap":"gap","Reason for Failure":"reason","Required Improvement":"improvement"}.get(h,h.lower().replace(" ","_"))
-                    c[i].text=xml_safe(x.get(mapping,""))
+                mapping={
+                    "Name":"name","Position":"position","Department":"department","Investigation Role":"role",
+                    "Date":"date","Time":"time","Event / Description":"event",
+                    "Factor":"factor","What Happened":"what_happened","Event / Condition":"event_condition",
+                    "Control Measure":"control_measure","Responsible Person":"responsible","Close Out":"close_out","Evidence":"evidence",
+                    "Causal Factor":"factor","Description":"description","Status":"status"
+                }
+                for i,h in enumerate(headers): c[i].text=xml_safe(x.get(mapping.get(h,h.lower().replace(" ","_")),""))
             style_docx_table(t,header=True,font_size=7)
-        icam_table("Evidence and Information Reviewed",["Evidence / Information","Reviewed?","Finding / Information Gap"],"icam_evidence")
         icam_table("Investigation Team",["Name","Position","Department","Investigation Role"],"icam_team")
-        icam_table("EVENT TIMELINE",["Date / Time","Event / Action","Person Involved","Relevant Condition","Evidence / Source"],"icam_timeline_events")
-        icam_table("EVENT & CAUSAL FACTORS CHART (ECFC)",["Sequence / Event","Type","Evidence / Source"],"icam_ecfc")
-        icam_table("A. ABSENT / FAILED DEFENCES (AFD)",["Barrier / Defence","Status","Cause","Evidence","Finding","Control Gap"],"icam_afd")
-        icam_table("B. INDIVIDUAL / TEAM ACTIONS (ITA)",["Action / Factor","Category","Influencing Condition","Evidence","Status"],"icam_ita")
-        icam_table("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)",["Task / Environmental Factor","Contributed?","Condition","Evidence","Status"],"icam_tec")
-        icam_table("D. ORGANISATIONAL FACTORS (OF)",["Organisational Factor","Condition / Systemic Issue","Evidence","Status"],"icam_of")
-        icam_table("CAUSAL FACTOR TABLE",["Causal Factor","ICAM Category","Description","Evidence","Contribution to Incident","Status"],"icam_causal")
-        icam_text("ROOT CAUSE / UNDERLYING CAUSE ANALYSIS","icam_root_cause_analysis")
-        icam_table("5-WHY ANALYSIS",["Significant Causal Factor","Why 1","Why 2","Why 3","Why 4","Why 5"],"icam_5why")
-        icam_table("CONTROL / BARRIER ANALYSIS",["Hazard","Existing Control","Expected Control","Actual Condition","Control Failure / Gap","Reason for Failure","Required Improvement"],"icam_barriers")
-        icam_text("Preventive / System Improvement Actions","icam_preventive_actions")
-        icam_text("Effectiveness Verification","icam_effectiveness_verification")
-        icam_text("Lessons Learned","icam_lessons_learned")
+        icam_table("EVENT TIMELINE",["Date","Time","Event / Description"],"icam_timeline_events")
+        for key,title in [("icam_a","A. DEFENCE / CONTROL FACTORS"),("icam_ita","B. INDIVIDUAL / TEAM ACTIONS (ITA)"),("icam_tec","C. TASK / ENVIRONMENTAL CONDITIONS (TEC)"),("icam_of","D. ORGANISATIONAL FACTORS (OF)")]:
+            icam_table(title,["Factor","What Happened","Event / Condition"],key)
+        icam_table("CONTROL MEASURES",["Factor","Control Measure","Responsible Person","Close Out","Evidence"],"icam_control_measures")
+        icam_table("CAUSAL FACTOR TABLE",["Causal Factor","Description","Status"],"icam_causal")
+        icam_text("Root Cause / Underlying Cause Analysis","icam_root_cause_analysis")
         icam_text("Recommendations","icam_recommendations")
-        icam_text("Conclusion","icam_conclusion")
-        summary_rows=[]
-        for key,label in [("icam_afd","AFD"),("icam_ita","ITA"),("icam_tec","TEC"),("icam_of","OF")]:
-            vals=details.get(key,[]) or []
-            if vals:
-                first=vals[0]
-                finding=first.get("finding","") or first.get("condition","") or first.get("description","")
-                evidence=first.get("evidence","")
-                factor=first.get("cause","") or first.get("factor","")
-                action=first.get("gap","") or first.get("improvement","")
-                summary_rows.append([label,finding,evidence,factor,action])
-        if summary_rows:
+        summary=[]
+        for key,label in [("icam_a","A"),("icam_ita","ITA"),("icam_tec","TEC"),("icam_of","OF")]:
+            for x in details.get(key,[]) or []:
+                summary.append([label,x.get("factor",""),x.get("what_happened",""),x.get("event_condition","")])
+        if summary:
             doc.add_heading("ICAM Category Summary",2)
-            st=doc.add_table(rows=1,cols=5)
-            for i,h in enumerate(["ICAM Category","Key Finding","Evidence","Root / Contributing Factor","Corrective Action"]): st.rows[0].cells[i].text=h
-            for vals in summary_rows:
+            st=doc.add_table(rows=1,cols=4)
+            for i,h in enumerate(["ICAM Category","Selected Factor","What Happened","Event / Condition"]): st.rows[0].cells[i].text=h
+            for vals in summary:
                 c=st.add_row().cells
                 for i,v in enumerate(vals): c[i].text=xml_safe(v)
             style_docx_table(st,header=True,font_size=7)
@@ -2460,62 +2437,98 @@ class MainWindow(QMainWindow):
             except Exception: old={}
             if m=="ICAM":
                 icam_box=QGroupBox("ICAM Analysis"); icam_lay=QVBoxLayout(icam_box)
-                icam_lay.addWidget(QLabel("Structured ICAM analysis. Record confirmed facts, evidence-based findings, possible factors and information gaps without assigning blame or inventing evidence."))
-                def txt(label,key,height=60):
+                icam_lay.addWidget(QLabel("Select applicable ICAM factors. Record what happened and the related event/condition. Control measures are generated automatically from the selected factors."))
+                severity_box=QGroupBox("Severity")
+                severity_lay=QVBoxLayout(severity_box)
+                severity=QComboBox()
+                severity_items=[
+                    ("Low", "Minor consequence; first-aid level or low impact."),
+                    ("Moderate", "Recordable / moderate consequence or significant operational impact."),
+                    ("Major", "Serious injury/illness, major damage or significant business impact."),
+                    ("Critical", "Life-threatening or very serious consequence; major loss potential."),
+                    ("Catastrophic", "Fatality, permanent disabling outcome or catastrophic loss potential."),
+                    ("Not Yet Determined", "Use when available evidence is insufficient to determine severity."),
+                ]
+                severity.addItems([x[0] for x in severity_items]); severity.setCurrentText(safe(old.get("icam_severity","Not Yet Determined")) or "Not Yet Determined")
+                severity_lay.addWidget(severity)
+                severity_guide=QLabel(); severity_guide.setWordWrap(True)
+                severity_lay.addWidget(severity_guide)
+                def update_severity_guide(_=None):
+                    txt=dict(severity_items).get(severity.currentText(),""); severity_guide.setText("Guidance: "+txt)
+                severity.currentTextChanged.connect(update_severity_guide); update_severity_guide()
+                icam_lay.addWidget(severity_box); proc_widgets.append(("icam_severity",severity))
+                def icam_txt(label,key,height=60):
                     w=QTextEdit(); w.setMinimumHeight(height); w.setPlainText(safe(old.get(key,""))); icam_lay.addWidget(QLabel(label)); icam_lay.addWidget(w); proc_widgets.append(("icam_text_"+key,w)); return w
-                # ICAM incident/event details that are method-specific and do not alter the existing incident fields.
-                txt("Actual Consequence", "icam_actual_consequence")
-                txt("Potential Consequence", "icam_potential_consequence")
-                txt("Initial Incident Classification / Severity", "icam_classification")
-                txt("Incident Description - factual chronological account", "icam_incident_description")
-                txt("Immediate Response / Containment", "icam_containment")
+                icam_txt("Immediate Response / Containment","icam_containment")
 
-                # Repeatable structured sections use the same add/remove pattern as Fishbone.
-                def icam_repeat(title,key,fields):
+                control_rebuild_callback=[None]
+                def icam_repeat(title,key,fields, factor_options=None):
                     box=QGroupBox(title); lay=QVBoxLayout(box); rows=[]
                     def add(data=None):
                         data=data or {}; h=QHBoxLayout(); widgets=[]
                         for fld,label in fields:
-                            w=QLineEdit(safe(data.get(fld,""))); w.setPlaceholderText(label); widgets.append(w); h.addWidget(w, 3 if fld in {"finding","evidence","description","factor","action"} else 2)
-                        rm=QPushButton("Remove"); h.addWidget(rm); wrap=QWidget(); wrap.setLayout(h); lay.addWidget(wrap); rows.append((wrap,)+tuple(widgets)); rm.clicked.connect(lambda:remove())
-                        def remove():
-                            item=next((x for x in rows if x[0] is wrap),None)
-                            if item: rows.remove(item); wrap.deleteLater()
-                    plus=QPushButton("+ Add")
-                    lay.addWidget(plus); plus.clicked.connect(lambda:add())
+                            if fld=="factor" and factor_options:
+                                w=QComboBox(); w.addItems(factor_options); w.setCurrentText(safe(data.get(fld,"")) or factor_options[0])
+                            else:
+                                w=QLineEdit(safe(data.get(fld,""))); w.setPlaceholderText(label)
+                            widgets.append(w); h.addWidget(w,3 if fld in {"what_happened","event_condition","description"} else 2)
+                        rm=QPushButton("Remove"); h.addWidget(rm); wrap=QWidget(); wrap.setLayout(h); lay.addWidget(wrap); rows.append((wrap,)+tuple(widgets))
+                        rm.clicked.connect(lambda:remove(wrap))
+                        if key in {"icam_a","icam_ita","icam_tec","icam_of"} and control_rebuild_callback[0]:
+                            control_rebuild_callback[0]()
+                    def remove(wrap):
+                        item=next((x for x in rows if x[0] is wrap),None)
+                        if item:
+                            rows.remove(item); wrap.deleteLater()
+                            if key in {"icam_a","icam_ita","icam_tec","icam_of"} and control_rebuild_callback[0]:
+                                control_rebuild_callback[0]()
+                    plus=QPushButton("+ Add"); lay.addWidget(plus); plus.clicked.connect(lambda:add())
                     for x in (old.get(key,[]) or []): add(x)
                     if not rows: add()
                     icam_lay.addWidget(box); proc_widgets.append(("icam_repeat_"+key,rows)); return rows
 
-                evidence_rows=icam_repeat("Evidence and Information Reviewed","icam_evidence",[
-                    ("type","Evidence / Information"),("reviewed","Reviewed?"),("finding","Finding / Information Gap")])
-                team_rows=icam_repeat("Investigation Team","icam_team",[
-                    ("name","Name"),("position","Position"),("department","Department"),("role","Investigation Role")])
-                timeline_rows=icam_repeat("EVENT TIMELINE - Add as many events as required","icam_timeline_events",[
-                    ("date_time","Date / Time"),("event","Event / Action"),("person","Person Involved"),("condition","Relevant Condition"),("evidence","Evidence / Source")])
-                ecfc_rows=icam_repeat("EVENT & CAUSAL FACTORS CHART (ECFC)","icam_ecfc",[
-                    ("sequence","Sequence / Event"),("type","Event / Condition / Causal Factor / Failed Control"),("evidence","Evidence / Source")])
-                afd_rows=icam_repeat("A. ABSENT / FAILED DEFENCES (AFD)","icam_afd",[
-                    ("defence","Barrier / Defence"),("status","Missing / Inadequate / Not Implemented / Not Maintained / Not Followed / Ineffective / Bypassed"),("cause","Cause"),("evidence","Evidence"),("finding","Finding"),("gap","Control Gap")])
-                ita_rows=icam_repeat("B. INDIVIDUAL / TEAM ACTIONS (ITA)","icam_ita",[
-                    ("factor","Action / Factor"),("category","Error / Mistake / Slip / Deviation / Decision / Communication / Competency / Supervision / Other"),("condition","Influencing Condition"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
-                tec_rows=icam_repeat("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)","icam_tec",[
-                    ("factor","Task / Environmental Factor"),("contributed","Contributed?"),("condition","Condition"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
-                of_rows=icam_repeat("D. ORGANISATIONAL FACTORS (OF)","icam_of",[
-                    ("factor","Organisational Factor"),("condition","Condition / Systemic Issue"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
-                causal_rows=icam_repeat("CAUSAL FACTOR TABLE","icam_causal",[
-                    ("factor","Causal Factor"),("category","ICAM Category"),("description","Description"),("evidence","Evidence"),("contribution","Contribution to Incident"),("status","Confirmed / Possible / Unverified")])
-                txt("Root Cause / Underlying Cause Analysis - Immediate, contributing, underlying and systemic causes", "icam_root_cause_analysis",80)
-                why_rows=icam_repeat("5-WHY ANALYSIS - Add one chain per significant causal factor","icam_5why",[
-                    ("factor","Significant Causal Factor"),("why1","Why 1"),("why2","Why 2"),("why3","Why 3"),("why4","Why 4"),("why5","Why 5")])
-                barrier_rows=icam_repeat("CONTROL / BARRIER ANALYSIS","icam_barriers",[
-                    ("hazard","Hazard"),("existing","Existing Control"),("expected","Expected Control"),("actual","Actual Condition"),("gap","Control Failure / Gap"),("reason","Reason for Failure"),("improvement","Required Improvement")])
-                txt("Preventive / System Improvement Actions - method-specific", "icam_preventive_actions",70)
-                txt("Lessons Learned", "icam_lessons_learned",70)
-                txt("Recommendations", "icam_recommendations",70)
-                txt("Effectiveness Verification - method / evidence / verifier / date / success criteria / result / closure status", "icam_effectiveness_verification",80)
-                txt("Conclusion", "icam_conclusion",80)
-                # Evidence uploads for ICAM are handled by the existing incident Evidence Attachments section.
+                team_rows=icam_repeat("Investigation Team","icam_team",[("name","Name"),("position","Position"),("department","Department"),("role","Investigation Role")])
+                timeline_rows=icam_repeat("EVENT TIMELINE - Add multiple events", "icam_timeline_events",[("date","Date"),("time","Time"),("event","Event / Description")])
+                factor_sets={
+                    "icam_a":["Physical Barriers","Engineering Controls","Isolation / LOTO","Guards","Alarms","Warning Systems","PPE","Procedures","Permits","Supervision","Inspections","Monitoring","Emergency Controls","Other"],
+                    "icam_ita":["Error / Mistake","Slip / Lapse","Rule / Procedure Deviation","Decision-Making","Communication","Situational Awareness","Competency","Teamwork","Coordination","Supervision","Fatigue","Distraction","Workload","Other"],
+                    "icam_tec":["Task Design","Task Complexity","Equipment Design","Equipment Condition","Workplace Layout","Access / Egress","Tools","Workload","Time Pressure","Staffing","Weather","Temperature","Lighting","Noise","Housekeeping","Ergonomics","Fatigue","Distraction","Other"],
+                    "icam_of":["Leadership","Management Systems","Safety Culture","Planning","Resource Allocation","Risk Management","Procedures","Training Systems","Competency Management","Supervision","Maintenance Management","Contractor Management","Communication","Change Management / MOC","Procurement","Design","Inspection","Audit","Performance Monitoring","Lessons Learned","Previous Incidents / Findings","Other"]
+                }
+                a_rows=icam_repeat("A. DEFENCE / CONTROL FACTORS","icam_a",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_a"])
+                ita_rows=icam_repeat("B. INDIVIDUAL / TEAM ACTIONS (ITA)","icam_ita",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_ita"])
+                tec_rows=icam_repeat("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)","icam_tec",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_tec"])
+                of_rows=icam_repeat("D. ORGANISATIONAL FACTORS (OF)","icam_of",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_of"])
+                causal_rows=icam_repeat("CAUSAL FACTOR TABLE","icam_causal",[("factor","Causal Factor"),("description","Description"),("status","Confirmed / Possible / Unverified")])
+                icam_txt("Root Cause / Underlying Cause Analysis - Immediate, contributing, underlying and systemic causes","icam_root_cause_analysis",80)
+                # Control measures are rebuilt from the currently selected A/B/C/D factors.
+                control_box=QGroupBox("CONTROL MEASURES - Auto generated from selected ICAM factors"); control_lay=QVBoxLayout(control_box); control_rows=[]
+                def selected_factor_records():
+                    out=[]
+                    for key,rows in [("icam_a",a_rows),("icam_ita",ita_rows),("icam_tec",tec_rows),("icam_of",of_rows)]:
+                        for item in rows:
+                            factor=item[1].currentText().strip() if isinstance(item[1],QComboBox) else item[1].text().strip()
+                            if factor: out.append((key,factor))
+                    return out
+                def rebuild_controls():
+                    old_controls=old.get("icam_control_measures",[]) or []
+                    old_by_factor={safe(x.get("factor")):x for x in old_controls if isinstance(x,dict)}
+                    for item in list(control_rows): item[0].deleteLater()
+                    control_rows.clear()
+                    for _,factor in selected_factor_records():
+                        data=old_by_factor.get(factor,{})
+                        h=QHBoxLayout(); fl=QLabel(factor); fl.setMinimumWidth(190); cm=QLineEdit(safe(data.get("control_measure",""))); rp=QLineEdit(safe(data.get("responsible",""))); co=QLineEdit(safe(data.get("close_out",""))); ev=QLineEdit(safe(data.get("evidence","")))
+                        cm.setPlaceholderText("Control Measure"); rp.setPlaceholderText("Responsible Person"); co.setPlaceholderText("Close Out"); ev.setPlaceholderText("Evidence")
+                        h.addWidget(fl,2); h.addWidget(cm,3); h.addWidget(rp,2); h.addWidget(co,2); h.addWidget(ev,2)
+                        wrap=QWidget(); wrap.setLayout(h); control_lay.addWidget(wrap); control_rows.append((wrap,factor,cm,rp,co,ev))
+                icam_lay.addWidget(control_box)
+                control_rebuild_callback[0]=rebuild_controls
+                for rows in (a_rows,ita_rows,tec_rows,of_rows):
+                    for item in rows:
+                        if isinstance(item[1],QComboBox): item[1].currentTextChanged.connect(lambda _=None: rebuild_controls())
+                rebuild_controls()
+                proc_widgets.extend([("icam_control_rows",control_rows)])
+                icam_txt("Recommendations","icam_recommendations",70)
                 procedure_form.addRow(icam_box)
             elif m=="5 Why Analysis":
                 for i in range(1,6): add_proc(f"Why {i}",f"why{i}",False,old.get(f"why{i}",""))
@@ -2775,6 +2788,10 @@ class MainWindow(QMainWindow):
                         proc["lessons_learned"]=w.toPlainText()
                     elif name=="fish_conclusion":
                         proc["conclusion"]=w.toPlainText()
+                    elif name=="icam_severity":
+                        proc["icam_severity"]=w.currentText()
+                    elif name=="icam_control_rows":
+                        proc["icam_control_measures"]=[{"factor":factor,"control_measure":cm.text().strip(),"responsible":rp.text().strip(),"close_out":co.text().strip(),"evidence":ev.text().strip()} for _,factor,cm,rp,co,ev in w if factor or cm.text().strip() or rp.text().strip() or co.text().strip() or ev.text().strip()]
                     elif name.startswith("icam_text_"):
                         proc[name.replace("icam_text_","")]=w.toPlainText()
                     elif name.startswith("icam_repeat_"):
@@ -2784,19 +2801,15 @@ class MainWindow(QMainWindow):
                             vals=item[1:]
                             obj={}
                             for fld,widget in zip({
-                                "icam_evidence":["type","reviewed","finding"],
                                 "icam_team":["name","position","department","role"],
-                                "icam_timeline_events":["date_time","event","person","condition","evidence"],
-                                "icam_ecfc":["sequence","type","evidence"],
-                                "icam_afd":["defence","status","cause","evidence","finding","gap"],
-                                "icam_ita":["factor","category","condition","evidence","status"],
-                                "icam_tec":["factor","contributed","condition","evidence","status"],
-                                "icam_of":["factor","condition","evidence","status"],
-                                "icam_causal":["factor","category","description","evidence","contribution","status"],
-                                "icam_5why":["factor","why1","why2","why3","why4","why5"],
-                                "icam_barriers":["hazard","existing","expected","actual","gap","reason","improvement"]
+                                "icam_timeline_events":["date","time","event"],
+                                "icam_a":["factor","what_happened","event_condition"],
+                                "icam_ita":["factor","what_happened","event_condition"],
+                                "icam_tec":["factor","what_happened","event_condition"],
+                                "icam_of":["factor","what_happened","event_condition"],
+                                "icam_causal":["factor","description","status"]
                             }.get("icam_repeat_"+key,[]), vals):
-                                obj[fld]=widget.text().strip()
+                                obj[fld]=(widget.currentText().strip() if isinstance(widget,QComboBox) else widget.text().strip())
                             if any(obj.values()): rows_out.append(obj)
                         proc[key]=rows_out
                     else:
