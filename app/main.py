@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.8"
+APP_VERSION = "1.4.11"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -709,23 +709,25 @@ def style_docx_table(table, header=True, font_size=7):
 
 
 def report_logo_path():
-    """Resolve the logo saved by Settings, including relative/legacy paths."""
+    """Resolve the current Settings logo reliably for Word, PDF and Excel reports."""
     configured=safe(db.setting("company_logo",""))
     candidates=[]
     if configured:
         cp=Path(configured)
-        candidates.extend([cp, APP_DIR / cp, ATTACH_DIR / cp.name])
+        candidates.extend([cp, APP_DIR / cp, APP_DIR / cp.name, ATTACH_DIR / cp.name])
     candidates += sorted(ATTACH_DIR.glob("company_logo.*"))
     seen=set()
     for p in candidates:
         try:
             p=Path(p)
-            key=str(p.resolve()) if p.exists() else str(p)
-            if key in seen: continue
-            seen.add(key)
-            if p.exists() and p.is_file(): return p
+            if not p.is_absolute():
+                p=(APP_DIR / p)
+            if p.exists() and p.is_file():
+                key=str(p.resolve())
+                if key not in seen:
+                    seen.add(key); return p.resolve()
         except Exception:
-            pass
+            logging.exception("Unable to resolve report logo")
     return None
 
 def add_docx_report_header(document,title,kind="REPORT",report_no=""):
@@ -808,6 +810,19 @@ def add_docx_kv_table(document, pairs):
     return table
 
 
+def add_docx_boxed_section(document, title, text, font_size=8):
+    if not safe(text):
+        return
+    document.add_heading(title, level=2)
+    t=document.add_table(rows=1, cols=1)
+    c=t.cell(0,0); c.text=xml_safe(text)
+    c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    style_docx_table(t, header=False, font_size=font_size)
+    for p in c.paragraphs:
+        p.paragraph_format.space_after=Pt(0)
+    return t
+
+
 def add_docx_attachments(document, rows):
     document.add_heading("Evidence / Attachments", level=2)
     if not rows:
@@ -819,7 +834,7 @@ def add_docx_attachments(document, rows):
         if path.exists() and path.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
             try:
                 p=document.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                p.add_run().add_picture(str(path), width=Inches(5.8))
+                p.add_run().add_picture(str(path), width=Inches(2.0), height=Inches(2.0))
             except Exception:
                 pass
         elif path.exists() and path.suffix.lower()==".pdf":
@@ -878,8 +893,8 @@ def generate_incident_docx(incident_id, path):
             elif key=="property_items": vals.append([x.get("name",""),x.get("cost","")])
             else: vals.append([x.get("reference",""),x.get("details","")])
         section_table(titleh,headers,vals)
-    for h,v in [("Incident Description",row["description"]),("Immediate Action",row["immediate_action"])]:
-        if v: doc.add_heading(h,2); doc.add_paragraph(xml_safe(v))
+    add_docx_boxed_section(doc,"Incident Description",row["description"],8)
+    add_docx_boxed_section(doc,"Immediate Response / Action",row["immediate_action"],8)
     # Witness statements, including optional attachment and remark for each statement.
     witnesses=details.get("witness_statements",[]) or []
     if witnesses:
@@ -888,6 +903,73 @@ def generate_incident_docx(incident_id, path):
             doc.add_paragraph(f"Witness {i}: {xml_safe(w.get('name',''))} | Remark: {xml_safe(w.get('remark',''))}")
             doc.add_paragraph(xml_safe(w.get("statement","")))
             if w.get("attachment"): doc.add_paragraph("Statement Attachment: "+xml_safe(w.get("attachment")))
+    if row["investigation_method"]=="ICAM":
+        doc.add_heading("ICAM ANALYSIS",2)
+        def icam_text(title,key):
+            v=details.get(key,"")
+            if v: add_docx_boxed_section(doc,title,v,8)
+        icam_text("Actual Consequence","icam_actual_consequence")
+        icam_text("Potential Consequence","icam_potential_consequence")
+        icam_text("Initial Incident Classification / Severity","icam_classification")
+        icam_text("Incident Description - Factual Chronological Account","icam_incident_description")
+        icam_text("Immediate Response / Containment","icam_containment")
+        def icam_table(title,headers,key):
+            vals=details.get(key,[]) or []
+            if not vals:return
+            doc.add_heading(title,2)
+            t=doc.add_table(rows=1,cols=len(headers))
+            for i,h in enumerate(headers):t.rows[0].cells[i].text=h
+            for x in vals:
+                c=t.add_row().cells
+                for i,h in enumerate(headers):
+                    mapping={
+                        "Evidence / Information":"type","Reviewed?":"reviewed","Finding / Information Gap":"finding",
+                        "Name":"name","Position":"position","Department":"department","Investigation Role":"role",
+                        "Date / Time":"date_time","Event / Action":"event","Person Involved":"person","Relevant Condition":"condition","Evidence / Source":"evidence",
+                        "Sequence / Event":"sequence","Type":"type","Event / Condition / Causal Factor / Failed Control":"type",
+                        "Barrier / Defence":"defence","Status":"status","Cause":"cause","Finding":"finding","Control Gap":"gap",
+                        "Action / Factor":"factor","Category":"category","Influencing Condition":"condition","Contribution to Incident":"contribution",
+                        "Task / Environmental Factor":"factor","Contributed?":"contributed","Condition":"condition","Organisational Factor":"factor","Condition / Systemic Issue":"condition",
+                        "Causal Factor":"factor","ICAM Category":"category","Description":"description",
+                        "Significant Causal Factor":"factor","Why 1":"why1","Why 2":"why2","Why 3":"why3","Why 4":"why4","Why 5":"why5",
+                        "Hazard":"hazard","Existing Control":"existing","Expected Control":"expected","Actual Condition":"actual","Control Failure / Gap":"gap","Reason for Failure":"reason","Required Improvement":"improvement"}.get(h,h.lower().replace(" ","_"))
+                    c[i].text=xml_safe(x.get(mapping,""))
+            style_docx_table(t,header=True,font_size=7)
+        icam_table("Evidence and Information Reviewed",["Evidence / Information","Reviewed?","Finding / Information Gap"],"icam_evidence")
+        icam_table("Investigation Team",["Name","Position","Department","Investigation Role"],"icam_team")
+        icam_table("EVENT TIMELINE",["Date / Time","Event / Action","Person Involved","Relevant Condition","Evidence / Source"],"icam_timeline_events")
+        icam_table("EVENT & CAUSAL FACTORS CHART (ECFC)",["Sequence / Event","Type","Evidence / Source"],"icam_ecfc")
+        icam_table("A. ABSENT / FAILED DEFENCES (AFD)",["Barrier / Defence","Status","Cause","Evidence","Finding","Control Gap"],"icam_afd")
+        icam_table("B. INDIVIDUAL / TEAM ACTIONS (ITA)",["Action / Factor","Category","Influencing Condition","Evidence","Status"],"icam_ita")
+        icam_table("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)",["Task / Environmental Factor","Contributed?","Condition","Evidence","Status"],"icam_tec")
+        icam_table("D. ORGANISATIONAL FACTORS (OF)",["Organisational Factor","Condition / Systemic Issue","Evidence","Status"],"icam_of")
+        icam_table("CAUSAL FACTOR TABLE",["Causal Factor","ICAM Category","Description","Evidence","Contribution to Incident","Status"],"icam_causal")
+        icam_text("ROOT CAUSE / UNDERLYING CAUSE ANALYSIS","icam_root_cause_analysis")
+        icam_table("5-WHY ANALYSIS",["Significant Causal Factor","Why 1","Why 2","Why 3","Why 4","Why 5"],"icam_5why")
+        icam_table("CONTROL / BARRIER ANALYSIS",["Hazard","Existing Control","Expected Control","Actual Condition","Control Failure / Gap","Reason for Failure","Required Improvement"],"icam_barriers")
+        icam_text("Preventive / System Improvement Actions","icam_preventive_actions")
+        icam_text("Effectiveness Verification","icam_effectiveness_verification")
+        icam_text("Lessons Learned","icam_lessons_learned")
+        icam_text("Recommendations","icam_recommendations")
+        icam_text("Conclusion","icam_conclusion")
+        summary_rows=[]
+        for key,label in [("icam_afd","AFD"),("icam_ita","ITA"),("icam_tec","TEC"),("icam_of","OF")]:
+            vals=details.get(key,[]) or []
+            if vals:
+                first=vals[0]
+                finding=first.get("finding","") or first.get("condition","") or first.get("description","")
+                evidence=first.get("evidence","")
+                factor=first.get("cause","") or first.get("factor","")
+                action=first.get("gap","") or first.get("improvement","")
+                summary_rows.append([label,finding,evidence,factor,action])
+        if summary_rows:
+            doc.add_heading("ICAM Category Summary",2)
+            st=doc.add_table(rows=1,cols=5)
+            for i,h in enumerate(["ICAM Category","Key Finding","Evidence","Root / Contributing Factor","Corrective Action"]): st.rows[0].cells[i].text=h
+            for vals in summary_rows:
+                c=st.add_row().cells
+                for i,v in enumerate(vals): c[i].text=xml_safe(v)
+            style_docx_table(st,header=True,font_size=7)
     if row["investigation_method"]=="Fishbone / Ishikawa":
         fish=details.get("fishbone",[]) or []
         doc.add_heading("Fishbone / Ishikawa Analysis",2)
@@ -909,7 +991,7 @@ def generate_incident_docx(incident_id, path):
                         if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                             try:
                                 pp=cells[4].paragraphs[0] if not cells[4].paragraphs[0].runs else cells[4].add_paragraph()
-                                pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(fp),width=Inches(1.25))
+                                pp.alignment=WD_ALIGN_PARAGRAPH.CENTER; pp.add_run().add_picture(str(fp),width=Inches(2.0),height=Inches(2.0))
                                 cells[4].add_paragraph(xml_safe(fp.name))
                             except Exception: cells[4].add_paragraph(xml_safe(fp.name))
                         else:
@@ -939,7 +1021,11 @@ def generate_incident_docx(incident_id, path):
             vals=factor_groups.get(cat,[])
             if vals: diagram_rows.append([cat,"; ".join(v for v in vals if v),safe(row["incident_title"]) or "INCIDENT / PROBLEM"])
         section_table("Fishbone Cause-and-Effect",["Main Factor","Possible Causes","Effect / Problem"],diagram_rows[1:] if len(diagram_rows)>1 else [])
-    for h,key,fallback in [("Direct Cause","direct_causes",row["direct_cause"]),("Contributing Factors","contributing_factors_list",row["contributing_factors"]),("Root Cause","root_causes_list",row["root_cause"])]:
+    vals=details.get("direct_causes",[])
+    vals=vals if isinstance(vals,list) else ([vals] if vals else [])
+    if not vals and row["direct_cause"]: vals=[row["direct_cause"]]
+    add_docx_boxed_section(doc,"Direct Cause", "\n".join(f"{i}. {v}" for i,v in enumerate(vals,1)),8)
+    for h,key,fallback in [("Contributing Factors","contributing_factors_list",row["contributing_factors"]),("Root Cause","root_causes_list",row["root_cause"])]:
         vals=details.get(key,[]); vals=vals if isinstance(vals,list) else ([vals] if vals else [])
         if not vals and fallback: vals=[fallback]
         doc.add_heading(h,2)
@@ -949,7 +1035,18 @@ def generate_incident_docx(incident_id, path):
     actions=details.get("corrective_actions",[]) or []
     section_table("Corrective Action Plan",["Action","Responsible","Target Date","Status","Closeout Evidence"],[[a.get("action",""),a.get("responsible",""),a.get("target_date",""),a.get("status","Open"),"; ".join(a.get("attachments",[])) or "None"] for a in actions])
     add_docx_attachments(doc,attachment_rows("incident_attachments",incident_id))
-    add_docx_signatures(doc); add_docx_footer(doc); save_docx_validated(doc,path)
+    sig=details.get("approval_signatures",{}) if isinstance(details.get("approval_signatures",{}),dict) else {}
+    document.add_paragraph()
+    document.add_heading("Review and Approval / Sign-off", level=2)
+    st=document.add_table(rows=4, cols=3); st.style="Table Grid"; st.autofit=False
+    for i,label in enumerate(["Prepared by","Reviewed by","Approved by"]):
+        st.cell(0,i).text=label
+        x=sig.get(label.lower().replace(" ","_"),{}) or {}
+        st.cell(1,i).text=f"Name: {x.get('name','')}"
+        st.cell(2,i).text=f"Position: {x.get('position','')}"
+        st.cell(3,i).text=f"Signature: {x.get('signature','')}\nDate: {x.get('date','')}"
+    style_docx_table(st,header=True,font_size=8)
+    add_docx_footer(doc); save_docx_validated(doc,path)
 
 
 OBSERVATION_EXPORT_FIELDS = [
@@ -1130,8 +1227,8 @@ def generate_observation_docx(path, record_ids=None):
                 p2.paragraph_format.space_before=Pt(0)
                 p2.paragraph_format.line_spacing=0.85
                 for run in p2.runs:
-                    run.font.size=Pt(5.2 if row_i else 5.3)
-    style_docx_table(table, header=True, font_size=5.2)
+                    run.font.size=Pt(8)
+    style_docx_table(table, header=True, font_size=8)
     add_docx_footer(doc)
     save_docx_validated(doc, path)
 
@@ -2362,7 +2459,64 @@ class MainWindow(QMainWindow):
             try: old=json.loads(safe(existing["investigation_details"]) or "{}") if existing else {}
             except Exception: old={}
             if m=="ICAM":
-                for lab,key in [("Timeline / Event Sequence","timeline"),("Failed or Missing Defenses / Barriers","failed_defenses"),("Immediate Causes","immediate_causes"),("Contributing Conditions","contributing_conditions"),("Organizational Factors","organizational_factors"),("Root Cause","root_cause_analysis")]: add_proc(lab,key,value=old.get(key,""))
+                icam_box=QGroupBox("ICAM Analysis"); icam_lay=QVBoxLayout(icam_box)
+                icam_lay.addWidget(QLabel("Structured ICAM analysis. Record confirmed facts, evidence-based findings, possible factors and information gaps without assigning blame or inventing evidence."))
+                def txt(label,key,height=60):
+                    w=QTextEdit(); w.setMinimumHeight(height); w.setPlainText(safe(old.get(key,""))); icam_lay.addWidget(QLabel(label)); icam_lay.addWidget(w); proc_widgets.append(("icam_text_"+key,w)); return w
+                # ICAM incident/event details that are method-specific and do not alter the existing incident fields.
+                txt("Actual Consequence", "icam_actual_consequence")
+                txt("Potential Consequence", "icam_potential_consequence")
+                txt("Initial Incident Classification / Severity", "icam_classification")
+                txt("Incident Description - factual chronological account", "icam_incident_description")
+                txt("Immediate Response / Containment", "icam_containment")
+
+                # Repeatable structured sections use the same add/remove pattern as Fishbone.
+                def icam_repeat(title,key,fields):
+                    box=QGroupBox(title); lay=QVBoxLayout(box); rows=[]
+                    def add(data=None):
+                        data=data or {}; h=QHBoxLayout(); widgets=[]
+                        for fld,label in fields:
+                            w=QLineEdit(safe(data.get(fld,""))); w.setPlaceholderText(label); widgets.append(w); h.addWidget(w, 3 if fld in {"finding","evidence","description","factor","action"} else 2)
+                        rm=QPushButton("Remove"); h.addWidget(rm); wrap=QWidget(); wrap.setLayout(h); lay.addWidget(wrap); rows.append((wrap,)+tuple(widgets)); rm.clicked.connect(lambda:remove())
+                        def remove():
+                            item=next((x for x in rows if x[0] is wrap),None)
+                            if item: rows.remove(item); wrap.deleteLater()
+                    plus=QPushButton("+ Add")
+                    lay.addWidget(plus); plus.clicked.connect(lambda:add())
+                    for x in (old.get(key,[]) or []): add(x)
+                    if not rows: add()
+                    icam_lay.addWidget(box); proc_widgets.append(("icam_repeat_"+key,rows)); return rows
+
+                evidence_rows=icam_repeat("Evidence and Information Reviewed","icam_evidence",[
+                    ("type","Evidence / Information"),("reviewed","Reviewed?"),("finding","Finding / Information Gap")])
+                team_rows=icam_repeat("Investigation Team","icam_team",[
+                    ("name","Name"),("position","Position"),("department","Department"),("role","Investigation Role")])
+                timeline_rows=icam_repeat("EVENT TIMELINE - Add as many events as required","icam_timeline_events",[
+                    ("date_time","Date / Time"),("event","Event / Action"),("person","Person Involved"),("condition","Relevant Condition"),("evidence","Evidence / Source")])
+                ecfc_rows=icam_repeat("EVENT & CAUSAL FACTORS CHART (ECFC)","icam_ecfc",[
+                    ("sequence","Sequence / Event"),("type","Event / Condition / Causal Factor / Failed Control"),("evidence","Evidence / Source")])
+                afd_rows=icam_repeat("A. ABSENT / FAILED DEFENCES (AFD)","icam_afd",[
+                    ("defence","Barrier / Defence"),("status","Missing / Inadequate / Not Implemented / Not Maintained / Not Followed / Ineffective / Bypassed"),("cause","Cause"),("evidence","Evidence"),("finding","Finding"),("gap","Control Gap")])
+                ita_rows=icam_repeat("B. INDIVIDUAL / TEAM ACTIONS (ITA)","icam_ita",[
+                    ("factor","Action / Factor"),("category","Error / Mistake / Slip / Deviation / Decision / Communication / Competency / Supervision / Other"),("condition","Influencing Condition"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
+                tec_rows=icam_repeat("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)","icam_tec",[
+                    ("factor","Task / Environmental Factor"),("contributed","Contributed?"),("condition","Condition"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
+                of_rows=icam_repeat("D. ORGANISATIONAL FACTORS (OF)","icam_of",[
+                    ("factor","Organisational Factor"),("condition","Condition / Systemic Issue"),("evidence","Evidence / Finding"),("status","Confirmed / Possible / Unverified")])
+                causal_rows=icam_repeat("CAUSAL FACTOR TABLE","icam_causal",[
+                    ("factor","Causal Factor"),("category","ICAM Category"),("description","Description"),("evidence","Evidence"),("contribution","Contribution to Incident"),("status","Confirmed / Possible / Unverified")])
+                txt("Root Cause / Underlying Cause Analysis - Immediate, contributing, underlying and systemic causes", "icam_root_cause_analysis",80)
+                why_rows=icam_repeat("5-WHY ANALYSIS - Add one chain per significant causal factor","icam_5why",[
+                    ("factor","Significant Causal Factor"),("why1","Why 1"),("why2","Why 2"),("why3","Why 3"),("why4","Why 4"),("why5","Why 5")])
+                barrier_rows=icam_repeat("CONTROL / BARRIER ANALYSIS","icam_barriers",[
+                    ("hazard","Hazard"),("existing","Existing Control"),("expected","Expected Control"),("actual","Actual Condition"),("gap","Control Failure / Gap"),("reason","Reason for Failure"),("improvement","Required Improvement")])
+                txt("Preventive / System Improvement Actions - method-specific", "icam_preventive_actions",70)
+                txt("Lessons Learned", "icam_lessons_learned",70)
+                txt("Recommendations", "icam_recommendations",70)
+                txt("Effectiveness Verification - method / evidence / verifier / date / success criteria / result / closure status", "icam_effectiveness_verification",80)
+                txt("Conclusion", "icam_conclusion",80)
+                # Evidence uploads for ICAM are handled by the existing incident Evidence Attachments section.
+                procedure_form.addRow(icam_box)
             elif m=="5 Why Analysis":
                 for i in range(1,6): add_proc(f"Why {i}",f"why{i}",False,old.get(f"why{i}",""))
             elif m=="Fishbone / Ishikawa":
@@ -2565,6 +2719,17 @@ class MainWindow(QMainWindow):
             except Exception: pass
         if not witness_rows: add_witness()
         form.addRow(witness_box)
+        approval_box=QGroupBox("Prepared / Reviewed / Approved By"); approval_form=QFormLayout(approval_box)
+        approval_rows={}
+        approval_old={}
+        try: approval_old=json.loads(safe(existing["investigation_details"]) or "{}").get("approval_signatures",{}) if existing else {}
+        except Exception: approval_old={}
+        for role in ["Prepared by","Reviewed by","Approved by"]:
+            key=role.lower().replace(" ","_"); data=approval_old.get(key,{}) if isinstance(approval_old,dict) else {}
+            n=QLineEdit(safe(data.get("name",""))); pos=QLineEdit(safe(data.get("position",""))); sig=QLineEdit(safe(data.get("signature",""))); dt=QLineEdit(safe(data.get("date","")))
+            approval_form.addRow(role+" - Name:",n); approval_form.addRow(role+" - Position:",pos); approval_form.addRow(role+" - Signature:",sig); approval_form.addRow(role+" - Date:",dt)
+            approval_rows[key]=(n,pos,sig,dt)
+        form.addRow(approval_box)
         status=QComboBox(); status.addItems(["Draft","Open","Closed"]); status.setCurrentText(safe(existing["status"]) if existing else "Draft"); form.addRow("Investigation Status:",status)
         evidence_box=QGroupBox("Evidence Attachments"); evidence_lay=QVBoxLayout(evidence_box); evidence_rows=[]
         def add_evidence():
@@ -2610,6 +2775,30 @@ class MainWindow(QMainWindow):
                         proc["lessons_learned"]=w.toPlainText()
                     elif name=="fish_conclusion":
                         proc["conclusion"]=w.toPlainText()
+                    elif name.startswith("icam_text_"):
+                        proc[name.replace("icam_text_","")]=w.toPlainText()
+                    elif name.startswith("icam_repeat_"):
+                        key=name.replace("icam_repeat_","")
+                        rows_out=[]
+                        for item in w:
+                            vals=item[1:]
+                            obj={}
+                            for fld,widget in zip({
+                                "icam_evidence":["type","reviewed","finding"],
+                                "icam_team":["name","position","department","role"],
+                                "icam_timeline_events":["date_time","event","person","condition","evidence"],
+                                "icam_ecfc":["sequence","type","evidence"],
+                                "icam_afd":["defence","status","cause","evidence","finding","gap"],
+                                "icam_ita":["factor","category","condition","evidence","status"],
+                                "icam_tec":["factor","contributed","condition","evidence","status"],
+                                "icam_of":["factor","condition","evidence","status"],
+                                "icam_causal":["factor","category","description","evidence","contribution","status"],
+                                "icam_5why":["factor","why1","why2","why3","why4","why5"],
+                                "icam_barriers":["hazard","existing","expected","actual","gap","reason","improvement"]
+                            }.get("icam_repeat_"+key,[]), vals):
+                                obj[fld]=widget.text().strip()
+                            if any(obj.values()): rows_out.append(obj)
+                        proc[key]=rows_out
                     else:
                         proc[name]=(w.toPlainText() if isinstance(w,QTextEdit) else w.text())
                 direct_vals=collect_rows(direct_rows); contrib_vals=collect_rows(contrib_rows); root_vals=collect_rows(root_rows)
@@ -2618,6 +2807,7 @@ class MainWindow(QMainWindow):
                     if a.text().strip() or r.text().strip() or t.text().strip() or att:
                         actions.append({"action":a.text().strip(),"responsible":r.text().strip(),"target_date":t.text().strip(),"status":st.currentText(),"attachments":[]})
                 details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
+                details["approval_signatures"]={key:{"name":vals[0].text().strip(),"position":vals[1].text().strip(),"signature":vals[2].text().strip(),"date":vals[3].text().strip()} for key,vals in approval_rows.items()}
                 if method.currentText()=="Fishbone / Ishikawa":
                     details["fishbone"]=fishbone_rows_data
                 details["environmental_items"]=[{"category":widgets[0].currentText().strip(),"quantity":widgets[1].text().strip()} for _,widgets in environmental_rows if widgets[0].currentText().strip() or widgets[1].text().strip()]
@@ -3366,7 +3556,7 @@ class MainWindow(QMainWindow):
                             remark=safe(a["remark"]) if "remark" in a.keys() else ""
                             if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                                 try:
-                                    evidence.append(RLImage(str(fp),width=65,height=48,preserveAspectRatio=True))
+                                    evidence.append(RLImage(str(fp),width=144,height=144,preserveAspectRatio=True))
                                     evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
                                 except Exception:
                                     evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
