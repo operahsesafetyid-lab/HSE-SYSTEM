@@ -888,6 +888,36 @@ def generate_incident_docx(incident_id, path):
             doc.add_paragraph(f"Witness {i}: {xml_safe(w.get('name',''))} | Remark: {xml_safe(w.get('remark',''))}")
             doc.add_paragraph(xml_safe(w.get("statement","")))
             if w.get("attachment"): doc.add_paragraph("Statement Attachment: "+xml_safe(w.get("attachment")))
+    if row["investigation_method"]=="Fishbone / Ishikawa":
+        fish=details.get("fishbone",[]) or []
+        doc.add_heading("Fishbone / Ishikawa Analysis",2)
+        section_table("Potential Causes",["Factor","Suggested Cause","Specific Cause / Explanation","Evidence / Finding"],[[x.get("category",""),x.get("cause",""),x.get("detail",""),x.get("evidence","")] for x in fish])
+        team=details.get("investigation_team",[]) or []
+        section_table("Investigation Team",["Name","Position","Department","Role in Investigation"],[[x.get("name",""),x.get("position",""),x.get("department",""),x.get("role","")] for x in team])
+        timeline=details.get("timeline_events",[]) or []
+        section_table("Timeline of Events",["Time","Event / What Happened"],[[x.get("time",""),x.get("event","")] for x in timeline])
+        if details.get("problem_statement"):
+            doc.add_heading("Problem Statement",2); doc.add_paragraph(xml_safe(details.get("problem_statement")))
+        why_vals=[[f"Why {i}",details.get(f"fishbone_why{i}","")] for i in range(1,6) if details.get(f"fishbone_why{i}","")]
+        section_table("5-Why Analysis",["Step","Analysis"],why_vals)
+        ver=details.get("root_cause_verification",[]) or []
+        section_table("Root Cause Verification",["Potential Cause","Evidence / Finding","Verified?","Responsible"],[[x.get("cause",""),x.get("evidence",""),x.get("verified",""),x.get("responsible","")] for x in ver])
+        if details.get("effectiveness_verification"):
+            doc.add_heading("Effectiveness Verification",2); doc.add_paragraph(xml_safe(details.get("effectiveness_verification")))
+        if details.get("lessons_learned"):
+            doc.add_heading("Lessons Learned",2); doc.add_paragraph(xml_safe(details.get("lessons_learned")))
+        if details.get("conclusion"):
+            doc.add_heading("Conclusion",2); doc.add_paragraph(xml_safe(details.get("conclusion")))
+        # Cause-and-effect summary showing the Fishbone factors leading to the incident/problem.
+        doc.add_heading("Cause-and-Effect Diagram",2)
+        factor_groups={}
+        for x in fish:
+            factor_groups.setdefault(x.get("category","Other"),[]).append(x.get("cause","") or x.get("detail",""))
+        diagram_rows=[["Factor","Possible Causes","Effect / Problem"]]
+        for cat in ["People","Machine / Equipment","Method","Material","Measurement","Environment","Other"]:
+            vals=factor_groups.get(cat,[])
+            if vals: diagram_rows.append([cat,"; ".join(v for v in vals if v),safe(row["incident_title"]) or "INCIDENT / PROBLEM"])
+        section_table("Fishbone Cause-and-Effect",["Main Factor","Possible Causes","Effect / Problem"],diagram_rows[1:] if len(diagram_rows)>1 else [])
     for h,key,fallback in [("Direct Cause","direct_causes",row["direct_cause"]),("Contributing Factors","contributing_factors_list",row["contributing_factors"]),("Root Cause","root_causes_list",row["root_cause"])]:
         vals=details.get(key,[]); vals=vals if isinstance(vals,list) else ([vals] if vals else [])
         if not vals and fallback: vals=[fallback]
@@ -1070,6 +1100,7 @@ def generate_observation_docx(path, record_ids=None):
     for row_i,rowx in enumerate(table.rows):
         trPr=rowx._tr.get_or_add_trPr()
         cant_split=OxmlElement("w:cantSplit"); trPr.append(cant_split)
+        _set_docx_row_height(rowx, 2160, "exact")  # 1.5 inch for every observation-table row.
         for i,cell in enumerate(rowx.cells):
             cell.width=Inches(widths[i])
             cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
@@ -2263,7 +2294,117 @@ class MainWindow(QMainWindow):
             elif m=="5 Why Analysis":
                 for i in range(1,6): add_proc(f"Why {i}",f"why{i}",False,old.get(f"why{i}",""))
             elif m=="Fishbone / Ishikawa":
-                for lab,key in [("People / Man","people"),("Machine / Equipment","machine"),("Method","method"),("Material","material"),("Environment","environment"),("Management / Measurement","management")]: add_proc(lab,key,value=old.get(key,""))
+                # Structured Fishbone / Ishikawa RCA workspace. The category lists and
+                # guidance below are based on the supplied Fishbone RCA structure.
+                fish_box=QGroupBox("Fishbone / Ishikawa Analysis")
+                fish_lay=QVBoxLayout(fish_box)
+                fish_lay.addWidget(QLabel("Identify possible causes under each factor. Select a suggested cause or choose Other and add a specific cause."))
+                fish_rows=[]
+                fish_options={
+                    "People": ["Lack of training","Expired / not evident training","Lack of experience","Fatigue","Human error","Poor communication","Inadequate supervision","Lack of competency","Other"],
+                    "Machine / Equipment": ["Equipment failure","Poor maintenance","Incorrect settings","Defective component","Lack of guarding","Calibration problem","Other"],
+                    "Method": ["Incorrect procedure","SOP not available","SOP not followed","Poor work planning","Inadequate risk assessment","Incorrect sequence of work","Other"],
+                    "Material": ["Wrong material","Defective material","Poor quality","Incorrect specification","Contamination","Improper storage","Other"],
+                    "Measurement": ["Incorrect measurement","Uncalibrated instrument","Wrong inspection method","Incorrect data","Inadequate monitoring","Other"],
+                    "Environment": ["Temperature","Humidity","Lighting","Noise","Dust","Poor housekeeping","Congestion","Weather conditions","Other"],
+                }
+                saved_fish=old.get("fishbone",{}) if isinstance(old.get("fishbone",{}),dict) else {}
+                for cat in fish_options:
+                    for item in (saved_fish.get(cat,[]) or []):
+                        pass
+                def add_fish_row(category="People", cause="", detail="", evidence=""):
+                    h=QHBoxLayout(); cat=QComboBox(); cat.addItems(list(fish_options.keys())+["Other"]); cat.setCurrentText(category if category in fish_options else "Other")
+                    cause_cb=QComboBox(); cause_cb.setEditable(True); cause_cb.addItems(fish_options.get(cat.currentText(),["Other"])); cause_cb.setCurrentText(cause)
+                    detail_e=QLineEdit(detail); detail_e.setPlaceholderText("Specific cause / explanation")
+                    evidence_e=QLineEdit(evidence); evidence_e.setPlaceholderText("Evidence / finding")
+                    rm=QPushButton("Remove")
+                    h.addWidget(cat,2); h.addWidget(cause_cb,3); h.addWidget(detail_e,3); h.addWidget(evidence_e,3); h.addWidget(rm)
+                    wrap=QWidget(); wrap.setLayout(h); fish_lay.addWidget(wrap); fish_rows.append((wrap,cat,cause_cb,detail_e,evidence_e))
+                    def refresh_causes(_=None):
+                        current=cause_cb.currentText(); cause_cb.blockSignals(True); cause_cb.clear(); cause_cb.addItems(fish_options.get(cat.currentText(),["Other"])); cause_cb.setCurrentText(current); cause_cb.blockSignals(False)
+                    cat.currentTextChanged.connect(refresh_causes)
+                    rm.clicked.connect(lambda: remove_fish_row(wrap))
+                def remove_fish_row(wrap):
+                    item=next((x for x in fish_rows if x[0] is wrap),None)
+                    if item: fish_rows.remove(item); wrap.deleteLater()
+                fish_headers=QLabel("Factor | Suggested Cause | Specific Cause / Explanation | Evidence / Finding")
+                fish_headers.setStyleSheet("font-weight:bold;color:#17365D;")
+                fish_lay.addWidget(fish_headers)
+                saved_rows=[]
+                for cat,items in saved_fish.items():
+                    for x in items or []:
+                        if isinstance(x,dict): saved_rows.append((cat,x.get("cause",""),x.get("detail",""),x.get("evidence","")))
+                if saved_rows:
+                    for x in saved_rows: add_fish_row(*x)
+                else:
+                    add_fish_row()
+                add_fish=QPushButton("+ Add Fishbone Cause")
+                fish_lay.addWidget(add_fish); add_fish.clicked.connect(lambda:add_fish_row())
+                fish_lay.addWidget(QLabel("Fishbone factors: People, Machine / Equipment, Method, Material, Measurement and Environment. Use Add for additional applicable causes."))
+                # Supporting Fishbone RCA sections from the supplied RCA flow. These are
+                # only shown when Fishbone is selected, so other investigation methods keep
+                # their existing UI unchanged.
+                fish_problem=QTextEdit(); fish_problem.setMinimumHeight(70); fish_problem.setPlainText(safe(old.get("problem_statement",""))); fish_lay.addWidget(QLabel("Problem Statement (what went wrong; do not put the suspected root cause here)")); fish_lay.addWidget(fish_problem)
+                team_box=QGroupBox("Investigation Team"); team_lay=QVBoxLayout(team_box); team_rows=[]
+                def add_team(data=None):
+                    data=data or {}; h=QHBoxLayout(); n=QLineEdit(safe(data.get("name",""))); pos=QLineEdit(safe(data.get("position",""))); dep=QLineEdit(safe(data.get("department",""))); role=QLineEdit(safe(data.get("role",""))); rm=QPushButton("Remove")
+                    n.setPlaceholderText("Name"); pos.setPlaceholderText("Position"); dep.setPlaceholderText("Department"); role.setPlaceholderText("Role in Investigation")
+                    h.addWidget(n,2); h.addWidget(pos,2); h.addWidget(dep,2); h.addWidget(role,2); h.addWidget(rm); w=QWidget(); w.setLayout(h); team_lay.addWidget(w); team_rows.append((w,n,pos,dep,role)); rm.clicked.connect(lambda:remove_team(w))
+                def remove_team(w):
+                    item=next((x for x in team_rows if x[0] is w),None)
+                    if item: team_rows.remove(item); w.deleteLater()
+                team_plus=QPushButton("+ Add Investigation Team Member"); team_lay.addWidget(team_plus); team_plus.clicked.connect(lambda:add_team())
+                for x in (old.get("investigation_team",[]) or []): add_team(x)
+                if not team_rows: add_team()
+                fish_lay.addWidget(team_box)
+                timeline_box=QGroupBox("Timeline of Events"); timeline_lay=QVBoxLayout(timeline_box); timeline_rows=[]
+                def add_timeline(data=None):
+                    data=data or {}; h=QHBoxLayout(); tm=QLineEdit(safe(data.get("time",""))); ev=QLineEdit(safe(data.get("event",""))); rm=QPushButton("Remove"); tm.setPlaceholderText("Time"); ev.setPlaceholderText("Event / What happened")
+                    h.addWidget(tm,1); h.addWidget(ev,5); h.addWidget(rm); w=QWidget(); w.setLayout(h); timeline_lay.addWidget(w); timeline_rows.append((w,tm,ev)); rm.clicked.connect(lambda:remove_timeline(w))
+                def remove_timeline(w):
+                    item=next((x for x in timeline_rows if x[0] is w),None)
+                    if item: timeline_rows.remove(item); w.deleteLater()
+                tl_plus=QPushButton("+ Add Timeline Event"); timeline_lay.addWidget(tl_plus); tl_plus.clicked.connect(lambda:add_timeline())
+                for x in (old.get("timeline_events",[]) or []): add_timeline(x)
+                if not timeline_rows: add_timeline()
+                fish_lay.addWidget(timeline_box)
+                why_box=QGroupBox("5-Why Analysis"); why_lay=QFormLayout(why_box); fish_why=[]
+                for i in range(1,6):
+                    w=QLineEdit(safe(old.get(f"fishbone_why{i}", old.get(f"why{i}","")))); fish_why.append(w); why_lay.addRow(f"Why {i}:",w)
+                fish_lay.addWidget(why_box)
+                verify_box=QGroupBox("Root Cause Verification"); verify_lay=QVBoxLayout(verify_box); verify_rows=[]
+                def add_verify(data=None):
+                    data=data or {}; h=QHBoxLayout(); cause=QLineEdit(safe(data.get("cause",""))); evidence=QLineEdit(safe(data.get("evidence",""))); verified=QComboBox(); verified.addItems(["Yes","No","Pending"]); verified.setCurrentText(safe(data.get("verified","Pending")) or "Pending"); person=QLineEdit(safe(data.get("responsible",""))); rm=QPushButton("Remove")
+                    cause.setPlaceholderText("Potential Cause"); evidence.setPlaceholderText("Evidence / Investigation Finding"); person.setPlaceholderText("Responsible for Verification")
+                    h.addWidget(cause,2); h.addWidget(evidence,3); h.addWidget(verified,1); h.addWidget(person,2); h.addWidget(rm); w=QWidget(); w.setLayout(h); verify_lay.addWidget(w); verify_rows.append((w,cause,evidence,verified,person)); rm.clicked.connect(lambda:remove_verify(w))
+                def remove_verify(w):
+                    item=next((x for x in verify_rows if x[0] is w),None)
+                    if item: verify_rows.remove(item); w.deleteLater()
+                vr_plus=QPushButton("+ Add Root Cause Verification"); verify_lay.addWidget(vr_plus); vr_plus.clicked.connect(lambda:add_verify())
+                for x in (old.get("root_cause_verification",[]) or []): add_verify(x)
+                if not verify_rows: add_verify()
+                fish_lay.addWidget(verify_box)
+                fish_effective=QTextEdit(); fish_effective.setMinimumHeight(60); fish_effective.setPlainText(safe(old.get("effectiveness_verification",""))); fish_lay.addWidget(QLabel("Effectiveness Verification")); fish_lay.addWidget(fish_effective)
+                fish_lessons=QTextEdit(); fish_lessons.setMinimumHeight(60); fish_lessons.setPlainText(safe(old.get("lessons_learned",""))); fish_lay.addWidget(QLabel("Lessons Learned")); fish_lay.addWidget(fish_lessons)
+                fish_conclusion=QTextEdit(); fish_conclusion.setMinimumHeight(60); fish_conclusion.setPlainText(safe(old.get("conclusion",""))); fish_lay.addWidget(QLabel("Conclusion")); fish_lay.addWidget(fish_conclusion)
+                proc_widgets.extend([
+                    ("fish_problem_statement", fish_problem),
+                    ("fish_investigation_team", team_rows),
+                    ("fish_timeline_events", timeline_rows),
+                    ("fish_why_widgets", fish_why),
+                    ("fish_root_cause_verification", verify_rows),
+                    ("fish_effectiveness_verification", fish_effective),
+                    ("fish_lessons_learned", fish_lessons),
+                    ("fish_conclusion", fish_conclusion),
+                ])
+                form.addRow(fish_box)
+                # Preserve any legacy Fishbone text when an older record is edited.
+                if not saved_rows:
+                    legacy_map={"People":"people","Machine / Equipment":"machine","Method":"method","Material":"material","Environment":"environment","Measurement":"management"}
+                    for cat,key in legacy_map.items():
+                        legacy=old.get(key,"")
+                        if legacy: add_fish_row(cat,"Other",legacy,"")
+                proc_widgets.append(("fishbone_rows", fish_rows))
             elif m=="Barrier Analysis":
                 for lab,key in [("Hazard / Threat","hazard"),("Top Event","top_event"),("Required Barriers","required_barriers"),("Failed / Missing Barriers","failed_barriers"),("Recovery / Mitigation","mitigation")]: add_proc(lab,key,value=old.get(key,""))
             elif m=="Bow-Tie Analysis":
@@ -2356,13 +2497,39 @@ class MainWindow(QMainWindow):
             if not edits["location"].text().strip(): QMessageBox.warning(dialog,"Required","Location is required."); return
             try:
                 number=safe(existing["number"]) if existing else next_number("HSE-INC","incidents")
-                proc={name:(w.toPlainText() if isinstance(w,QTextEdit) else w.text()) for name,w in proc_widgets}
+                proc={}
+                fishbone_rows_data=[]
+                for name,w in proc_widgets:
+                    if name=="fishbone_rows":
+                        for _,cat,cause_cb,detail_e,evidence_e in w:
+                            if cat.currentText().strip() or cause_cb.currentText().strip() or detail_e.text().strip() or evidence_e.text().strip():
+                                fishbone_rows_data.append({"category":cat.currentText().strip(),"cause":cause_cb.currentText().strip(),"detail":detail_e.text().strip(),"evidence":evidence_e.text().strip()})
+                    elif name=="fish_problem_statement":
+                        proc["problem_statement"]=w.toPlainText()
+                    elif name=="fish_investigation_team":
+                        proc["investigation_team"]=[{"name":n.text().strip(),"position":pos.text().strip(),"department":dep.text().strip(),"role":role.text().strip()} for _,n,pos,dep,role in w if any(z.text().strip() for z in (n,pos,dep,role))]
+                    elif name=="fish_timeline_events":
+                        proc["timeline_events"]=[{"time":tm.text().strip(),"event":ev.text().strip()} for _,tm,ev in w if tm.text().strip() or ev.text().strip()]
+                    elif name=="fish_why_widgets":
+                        for i,wid in enumerate(w,1): proc[f"fishbone_why{i}"]=wid.text().strip()
+                    elif name=="fish_root_cause_verification":
+                        proc["root_cause_verification"]=[{"cause":cause.text().strip(),"evidence":evidence.text().strip(),"verified":verified.currentText(),"responsible":person.text().strip()} for _,cause,evidence,verified,person in w if any(z.text().strip() for z in (cause,evidence,person))]
+                    elif name=="fish_effectiveness_verification":
+                        proc["effectiveness_verification"]=w.toPlainText()
+                    elif name=="fish_lessons_learned":
+                        proc["lessons_learned"]=w.toPlainText()
+                    elif name=="fish_conclusion":
+                        proc["conclusion"]=w.toPlainText()
+                    else:
+                        proc[name]=(w.toPlainText() if isinstance(w,QTextEdit) else w.text())
                 direct_vals=collect_rows(direct_rows); contrib_vals=collect_rows(contrib_rows); root_vals=collect_rows(root_rows)
                 actions=[]
                 for _,a,r,t,st,att,lab in ca_rows:
                     if a.text().strip() or r.text().strip() or t.text().strip() or att:
                         actions.append({"action":a.text().strip(),"responsible":r.text().strip(),"target_date":t.text().strip(),"status":st.currentText(),"attachments":[]})
                 details=proc; details.update({"direct_causes":direct_vals,"contributing_factors_list":contrib_vals,"root_causes_list":root_vals,"corrective_actions":actions})
+                if method.currentText()=="Fishbone / Ishikawa":
+                    details["fishbone"]=fishbone_rows_data
                 details["environmental_items"]=[{"category":widgets[0].currentText().strip(),"quantity":widgets[1].text().strip()} for _,widgets in environmental_rows if widgets[0].currentText().strip() or widgets[1].text().strip()]
                 details["property_items"]=[{"name":widgets[0].text().strip(),"cost":widgets[1].text().strip()} for _,widgets in property_rows if any(w.text().strip() for w in widgets)]
                 details["procedure_items"]=[{"reference":widgets[0].text().strip(),"details":widgets[1].text().strip()} for _,widgets in procedure_rows if any(w.text().strip() for w in widgets)]
