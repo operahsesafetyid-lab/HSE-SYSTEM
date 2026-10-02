@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.4.8"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -1485,10 +1485,42 @@ def generate_table_docx(table_name, path, record_ids=None):
     table = doc.add_table(rows=1, cols=len(columns))
     for i, col in enumerate(columns):
         table.rows[0].cells[i].text = xml_safe(col)
-    for row in data[:1000]:
-        cells = table.add_row().cells
-        for i, value in enumerate(row):
-            cells[i].text = xml_safe(value)
+    if table_name == "incidents" and "Attachments" in columns:
+        incident_rows = db.fetchall("SELECT * FROM incidents ORDER BY id DESC")
+        if record_ids:
+            wanted=set(record_ids); incident_rows=[r for r in incident_rows if r["id"] in wanted]
+        attach_col=columns.index("Attachments")
+        for r in incident_rows[:1000]:
+            cells=table.add_row().cells
+            # Populate the same register fields as table_data_static, but replace the
+            # attachment-count/text cell with the actual evidence files.
+            for i,col in enumerate(columns):
+                if col != "Attachments":
+                    cells[i].text=xml_safe(r[col] if col in r.keys() else "")
+            attachments=attachment_rows("incident_attachments",r["id"])
+            if not attachments:
+                cells[attach_col].text="No attachment"
+            else:
+                cells[attach_col].text=""
+                for a in attachments:
+                    fp=Path(safe(a["file_path"]))
+                    remark=safe(a["remark"]) if "remark" in a.keys() else ""
+                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                        try:
+                            pp=cells[attach_col].paragraphs[0] if not cells[attach_col].paragraphs[0].runs else cells[attach_col].add_paragraph()
+                            pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                            pp.add_run().add_picture(str(fp),width=Inches(1.25))
+                            cap=cells[attach_col].add_paragraph(fp.name + (f" | {remark}" if remark else ""))
+                            cap.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                        except Exception:
+                            cells[attach_col].add_paragraph(fp.name + (f" | {remark}" if remark else ""))
+                    else:
+                        cells[attach_col].add_paragraph(fp.name + (f" | {remark}" if remark else ""))
+    else:
+        for row in data[:1000]:
+            cells = table.add_row().cells
+            for i, value in enumerate(row):
+                cells[i].text = xml_safe(value)
     style_docx_table(table)
     add_docx_footer(doc)
     save_docx_validated(doc, path)
@@ -2172,7 +2204,9 @@ class MainWindow(QMainWindow):
         def load():
             rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC"); table.setRowCount(len(rows))
             for r,row in enumerate(rows):
-                count=db.fetchone("SELECT COUNT(*) c FROM incident_attachments WHERE incident_id=?",(row["id"],))["c"]
+                # Show the actual evidence file names in the register instead of an
+                # attachment count, so the user can immediately see what is attached.
+                attached_names=attachment_names("incident_attachments",row["id"]) or "No attachment"
                 
                 total=10; done=sum(bool(safe(row[k])) for k in ["incident_date","incident_time","location","project","incident_type","description","immediate_action","investigation_method","direct_cause","root_cause"])
                 pct=round(done*100/total)
@@ -2180,7 +2214,7 @@ class MainWindow(QMainWindow):
                     report_details=json.loads(safe(row["investigation_details"]) or "{}")
                 except Exception:
                     report_details={}
-                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",count,"Available" if report_details.get("professional_report_generated") else "Not Generated"]
+                vals=[row["id"],row["number"],row["incident_date"],row["incident_type"],row["location"],row["project"],row["investigation_method"],row["status"],f"{pct}%",attached_names,"Available" if report_details.get("professional_report_generated") else "Not Generated"]
                 for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
         def professional():
             incident_id=self.selected_id(table,"Professional Report")
@@ -2273,8 +2307,25 @@ class MainWindow(QMainWindow):
         procedure_rows=repeat_section("Procedure / Reference",[("reference","Procedure / Reference"),("details","Details")],"procedure_items")
         add_edit("organization","Organisation",existing["organization"] if existing else "")
         add_edit("report_reference","Report / Reference No.",existing["report_reference"] if existing else "")
-        method=QComboBox(); method.addItems(INVESTIGATION_METHODS); form.addRow("Investigation Method:",method)
+        method=QComboBox(); method.addItems(INVESTIGATION_METHODS)
         if existing: method.setCurrentText(safe(existing["investigation_method"]))
+        # Lock the selected investigation method so the method-specific content cannot
+        # be changed accidentally.  Unlock is explicit and reversible.
+        method_row=QHBoxLayout(); method_row.addWidget(method,1)
+        method_lock=QPushButton("Lock Method"); method_lock.setMinimumHeight(34); method_lock.setMinimumWidth(125)
+        method_state=QLabel("Unlocked")
+        method_state.setStyleSheet("font-weight:bold;color:#8A6D1D;")
+        method_row.addWidget(method_lock); method_row.addWidget(method_state)
+        method_wrap=QWidget(); method_wrap.setLayout(method_row); form.addRow("Investigation Method:",method_wrap)
+        method_locked=[False]
+        def toggle_method_lock():
+            method_locked[0]=not method_locked[0]
+            method.setEnabled(not method_locked[0])
+            if method_locked[0]:
+                method_lock.setText("Unlock Method"); method_state.setText("Locked"); method_state.setStyleSheet("font-weight:bold;color:#B00020;")
+            else:
+                method_lock.setText("Lock Method"); method_state.setText("Unlocked"); method_state.setStyleSheet("font-weight:bold;color:#8A6D1D;")
+        method_lock.clicked.connect(toggle_method_lock)
         procedure_box=QGroupBox("Investigation Procedure"); procedure_layout=QVBoxLayout(procedure_box); procedure_form=QFormLayout(); procedure_layout.addLayout(procedure_form); form.addRow(procedure_box); proc_widgets=[]
         def clear_proc():
             while procedure_form.count():
@@ -2339,7 +2390,11 @@ class MainWindow(QMainWindow):
                 else:
                     add_fish_row()
                 add_fish=QPushButton("+ Add Fishbone Cause")
-                fish_lay.addWidget(add_fish); add_fish.clicked.connect(lambda:add_fish_row())
+                add_fish.setMinimumHeight(36)
+                fish_lay.addWidget(add_fish)
+                # Keep the button bound to the current Fishbone workspace.  The
+                # workspace itself is recreated only when the method changes.
+                add_fish.clicked.connect(add_fish_row)
                 fish_lay.addWidget(QLabel("Fishbone factors: People, Machine / Equipment, Method, Material, Measurement and Environment. Use Add for additional applicable causes."))
                 # Supporting Fishbone RCA sections from the supplied RCA flow. These are
                 # only shown when Fishbone is selected, so other investigation methods keep
@@ -2397,7 +2452,10 @@ class MainWindow(QMainWindow):
                     ("fish_lessons_learned", fish_lessons),
                     ("fish_conclusion", fish_conclusion),
                 ])
-                form.addRow(fish_box)
+                # IMPORTANT: the Fishbone workspace belongs to the investigation
+                # procedure container.  Putting it directly on the outer form caused
+                # old Fishbone panels to remain when another method was selected.
+                procedure_form.addRow(fish_box)
                 # Preserve any legacy Fishbone text when an older record is edited.
                 if not saved_rows:
                     legacy_map={"People":"people","Machine / Equipment":"machine","Method":"method","Material":"material","Environment":"environment","Measurement":"management"}
@@ -3240,12 +3298,38 @@ class MainWindow(QMainWindow):
                 col_widths=[0.32*72,0.66*72,0.88*72,0.78*72,0.78*72,1.55*72,1.35*72,0.78*72,1.62*72,0.58*72]
                 t=Table(pdf_data,repeatRows=1,colWidths=col_widths)
             else:
-                if len(columns) > 10 and "Attachments" in columns:
+                if table_name == "incidents" and "Attachments" in columns:
                     display_indices=list(range(9))+[columns.index("Attachments")]
+                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]
+                    incident_rows=db.fetchall("SELECT * FROM incidents ORDER BY id DESC")
+                    if record_ids:
+                        wanted=set(record_ids); incident_rows=[r for r in incident_rows if r["id"] in wanted]
+                    cell_style=styles["Normal"]; cell_style.fontSize=5.5; cell_style.leading=6
+                    for r in incident_rows[:500]:
+                        vals=[xml_safe(r[columns[i]] if columns[i] in r.keys() else "") for i in display_indices[:-1]]
+                        evidence=[]
+                        for a in attachment_rows("incident_attachments",r["id"]):
+                            fp=Path(safe(a["file_path"]))
+                            remark=safe(a["remark"]) if "remark" in a.keys() else ""
+                            if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                                try:
+                                    evidence.append(RLImage(str(fp),width=65,height=48,preserveAspectRatio=True))
+                                    evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
+                                except Exception:
+                                    evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
+                            else:
+                                evidence.append(Paragraph(xml_safe(fp.name + (f" | {remark}" if remark else "")),cell_style))
+                        if not evidence: evidence=[Paragraph("No attachment",cell_style)]
+                        pdf_data.append([Paragraph(v.replace("\n","<br/>"),cell_style) for v in vals]+[evidence])
+                    t=Table(pdf_data,repeatRows=1,colWidths=[55,55,65,65,65,90,75,65,75,125])
+                elif len(columns) > 10 and "Attachments" in columns:
+                    display_indices=list(range(9))+[columns.index("Attachments")]
+                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
+                    t=Table(pdf_data,repeatRows=1)
                 else:
                     display_indices=list(range(min(len(columns),10)))
-                pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
-                t=Table(pdf_data,repeatRows=1)
+                    pdf_data=[[xml_safe(columns[i]) for i in display_indices]]+[[xml_safe(r[i]) for i in display_indices] for r in data[:500]]
+                    t=Table(pdf_data,repeatRows=1)
             t.setStyle(TableStyle([
                 ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),
                 ("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP"),
