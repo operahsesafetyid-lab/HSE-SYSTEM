@@ -909,7 +909,6 @@ def generate_incident_docx(incident_id, path):
             v=details.get(key,"")
             if v: add_docx_boxed_section(doc,title,v,8)
         icam_text("Severity", "icam_severity")
-        icam_text("Immediate Response / Containment", "icam_containment")
         def icam_table(title,headers,key):
             vals=details.get(key,[]) or []
             if not vals:return
@@ -922,8 +921,7 @@ def generate_incident_docx(incident_id, path):
                     "Name":"name","Position":"position","Department":"department","Investigation Role":"role",
                     "Date":"date","Time":"time","Event / Description":"event",
                     "Factor":"factor","What Happened":"what_happened","Event / Condition":"event_condition",
-                    "Control Measure":"control_measure","Responsible Person":"responsible","Close Out":"close_out","Evidence":"evidence",
-                    "Causal Factor":"factor","Description":"description","Status":"status"
+                    "Control Measure Description":"control_measure","Responsible Person":"responsible","Open / Close":"status","Target Date":"target_date",
                 }
                 for i,h in enumerate(headers): c[i].text=xml_safe(x.get(mapping.get(h,h.lower().replace(" ","_")),""))
             style_docx_table(t,header=True,font_size=7)
@@ -931,9 +929,7 @@ def generate_incident_docx(incident_id, path):
         icam_table("EVENT TIMELINE",["Date","Time","Event / Description"],"icam_timeline_events")
         for key,title in [("icam_a","A. DEFENCE / CONTROL FACTORS"),("icam_ita","B. INDIVIDUAL / TEAM ACTIONS (ITA)"),("icam_tec","C. TASK / ENVIRONMENTAL CONDITIONS (TEC)"),("icam_of","D. ORGANISATIONAL FACTORS (OF)")]:
             icam_table(title,["Factor","What Happened","Event / Condition"],key)
-        icam_table("CONTROL MEASURES",["Factor","Control Measure","Responsible Person","Close Out","Evidence"],"icam_control_measures")
-        icam_table("CAUSAL FACTOR TABLE",["Causal Factor","Description","Status"],"icam_causal")
-        icam_text("Root Cause / Underlying Cause Analysis","icam_root_cause_analysis")
+        icam_table("CONTROL MEASURES",["Factor","Control Measure Description","Responsible Person","Open / Close","Target Date"],"icam_control_measures")
         icam_text("Recommendations","icam_recommendations")
         summary=[]
         for key,label in [("icam_a","A"),("icam_ita","ITA"),("icam_tec","TEC"),("icam_of","OF")]:
@@ -2459,7 +2455,6 @@ class MainWindow(QMainWindow):
                 icam_lay.addWidget(severity_box); proc_widgets.append(("icam_severity",severity))
                 def icam_txt(label,key,height=60):
                     w=QTextEdit(); w.setMinimumHeight(height); w.setPlainText(safe(old.get(key,""))); icam_lay.addWidget(QLabel(label)); icam_lay.addWidget(w); proc_widgets.append(("icam_text_"+key,w)); return w
-                icam_txt("Immediate Response / Containment","icam_containment")
 
                 control_rebuild_callback=[None]
                 def icam_repeat(title,key,fields, factor_options=None):
@@ -2499,28 +2494,58 @@ class MainWindow(QMainWindow):
                 ita_rows=icam_repeat("B. INDIVIDUAL / TEAM ACTIONS (ITA)","icam_ita",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_ita"])
                 tec_rows=icam_repeat("C. TASK / ENVIRONMENTAL CONDITIONS (TEC)","icam_tec",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_tec"])
                 of_rows=icam_repeat("D. ORGANISATIONAL FACTORS (OF)","icam_of",[("factor","Factor"),("what_happened","What Happened"),("event_condition","Event / Condition")],factor_sets["icam_of"])
-                causal_rows=icam_repeat("CAUSAL FACTOR TABLE","icam_causal",[("factor","Causal Factor"),("description","Description"),("status","Confirmed / Possible / Unverified")])
-                icam_txt("Root Cause / Underlying Cause Analysis - Immediate, contributing, underlying and systemic causes","icam_root_cause_analysis",80)
-                # Control measures are rebuilt from the currently selected A/B/C/D factors.
-                control_box=QGroupBox("CONTROL MEASURES - Auto generated from selected ICAM factors"); control_lay=QVBoxLayout(control_box); control_rows=[]
+                # Control measures are always a one-to-one match with the currently
+                # displayed A/B/C/D attribution-factor rows. The selected factor is
+                # fetched directly from the attribution row; the user only enters the
+                # control description, responsible person, status and target date.
+                control_box=QGroupBox("CONTROL MEASURES - Matched to ICAM Attribution Factors")
+                control_lay=QVBoxLayout(control_box); control_rows=[]
+                control_header=QLabel("Factor | Control Measure Description | Responsible Person | Open / Close | Target Date")
+                control_header.setStyleSheet("font-weight:bold;color:#17365D;")
+                control_lay.addWidget(control_header)
                 def selected_factor_records():
                     out=[]
                     for key,rows in [("icam_a",a_rows),("icam_ita",ita_rows),("icam_tec",tec_rows),("icam_of",of_rows)]:
                         for item in rows:
                             factor=item[1].currentText().strip() if isinstance(item[1],QComboBox) else item[1].text().strip()
-                            if factor: out.append((key,factor))
+                            if factor: out.append((key,item,factor))
                     return out
                 def rebuild_controls():
-                    old_controls=old.get("icam_control_measures",[]) or []
-                    old_by_factor={safe(x.get("factor")):x for x in old_controls if isinstance(x,dict)}
+                    # Preserve values by the actual attribution-row object so adding
+                    # another factor never steals or duplicates another row's data.
+                    current_values={}
+                    for item in control_rows:
+                        _,source_item,_,cm,rp,status,target=item
+                        current_values[id(source_item)]={
+                            "control_measure":cm.text().strip(),
+                            "responsible":rp.text().strip(),
+                            "status":status.currentText(),
+                            "target_date":target.text().strip(),
+                        }
+                    saved_controls=old.get("icam_control_measures",[]) or []
+                    saved_by_factor={}
+                    for x in saved_controls:
+                        if isinstance(x,dict):
+                            saved_by_factor.setdefault(safe(x.get("factor")),[]).append(x)
                     for item in list(control_rows): item[0].deleteLater()
                     control_rows.clear()
-                    for _,factor in selected_factor_records():
-                        data=old_by_factor.get(factor,{})
-                        h=QHBoxLayout(); fl=QLabel(factor); fl.setMinimumWidth(190); cm=QLineEdit(safe(data.get("control_measure",""))); rp=QLineEdit(safe(data.get("responsible",""))); co=QLineEdit(safe(data.get("close_out",""))); ev=QLineEdit(safe(data.get("evidence","")))
-                        cm.setPlaceholderText("Control Measure"); rp.setPlaceholderText("Responsible Person"); co.setPlaceholderText("Close Out"); ev.setPlaceholderText("Evidence")
-                        h.addWidget(fl,2); h.addWidget(cm,3); h.addWidget(rp,2); h.addWidget(co,2); h.addWidget(ev,2)
-                        wrap=QWidget(); wrap.setLayout(h); control_lay.addWidget(wrap); control_rows.append((wrap,factor,cm,rp,co,ev))
+                    saved_occurrence={}
+                    for _,source_item,factor in selected_factor_records():
+                        data=current_values.get(id(source_item))
+                        if data is None:
+                            idx=saved_occurrence.get(factor,0)
+                            matches=saved_by_factor.get(factor,[])
+                            data=matches[idx] if idx < len(matches) else {}
+                            saved_occurrence[factor]=idx+1
+                        h=QHBoxLayout()
+                        fl=QLabel(factor); fl.setMinimumWidth(190); fl.setToolTip("Fetched directly from the selected ICAM attribution factor")
+                        cm=QLineEdit(safe(data.get("control_measure",""))); cm.setPlaceholderText("Control Measure Description")
+                        rp=QLineEdit(safe(data.get("responsible",""))); rp.setPlaceholderText("Responsible Person")
+                        status=QComboBox(); status.addItems(["Open","Closed"]); status.setCurrentText(safe(data.get("status",data.get("close_out","Open"))) or "Open")
+                        target=QLineEdit(safe(data.get("target_date",data.get("close_out","")) if data.get("target_date","") or data.get("close_out","") else "")); target.setPlaceholderText("Target Date")
+                        h.addWidget(fl,2); h.addWidget(cm,3); h.addWidget(rp,2); h.addWidget(status,1); h.addWidget(target,2)
+                        wrap=QWidget(); wrap.setLayout(h); control_lay.addWidget(wrap)
+                        control_rows.append((wrap,source_item,factor,cm,rp,status,target))
                 icam_lay.addWidget(control_box)
                 control_rebuild_callback[0]=rebuild_controls
                 for rows in (a_rows,ita_rows,tec_rows,of_rows):
@@ -2791,7 +2816,12 @@ class MainWindow(QMainWindow):
                     elif name=="icam_severity":
                         proc["icam_severity"]=w.currentText()
                     elif name=="icam_control_rows":
-                        proc["icam_control_measures"]=[{"factor":factor,"control_measure":cm.text().strip(),"responsible":rp.text().strip(),"close_out":co.text().strip(),"evidence":ev.text().strip()} for _,factor,cm,rp,co,ev in w if factor or cm.text().strip() or rp.text().strip() or co.text().strip() or ev.text().strip()]
+                        proc["icam_control_measures"]=[
+                            {"factor":factor,"control_measure":cm.text().strip(),"responsible":rp.text().strip(),
+                             "status":status.currentText(),"target_date":target.text().strip()}
+                            for _,source_item,factor,cm,rp,status,target in w
+                            if factor or cm.text().strip() or rp.text().strip() or target.text().strip()
+                        ]
                     elif name.startswith("icam_text_"):
                         proc[name.replace("icam_text_","")]=w.toPlainText()
                     elif name.startswith("icam_repeat_"):
@@ -2806,8 +2836,7 @@ class MainWindow(QMainWindow):
                                 "icam_a":["factor","what_happened","event_condition"],
                                 "icam_ita":["factor","what_happened","event_condition"],
                                 "icam_tec":["factor","what_happened","event_condition"],
-                                "icam_of":["factor","what_happened","event_condition"],
-                                "icam_causal":["factor","description","status"]
+                                "icam_of":["factor","what_happened","event_condition"]
                             }.get("icam_repeat_"+key,[]), vals):
                                 obj[fld]=(widget.currentText().strip() if isinstance(widget,QComboBox) else widget.text().strip())
                             if any(obj.values()): rows_out.append(obj)
