@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.14"
+APP_VERSION = "1.4.15"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -343,8 +343,10 @@ class Database:
         finding_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_findings)").fetchall()}
         finding_extra = {
             "finding_number": "INTEGER DEFAULT 1",
+            "finding_standard": "TEXT DEFAULT ''",
             "finding_detail": "TEXT DEFAULT ''",
             "responsible_person_id": "INTEGER",
+            "location": "TEXT DEFAULT ''",
             "created_at": "TEXT DEFAULT ''",
             "updated_at": "TEXT DEFAULT ''"
         }
@@ -3101,10 +3103,34 @@ class MainWindow(QMainWindow):
             if aid: self.audit_workspace(aid, load)
         new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings)
         table.cellDoubleClicked.connect(lambda *_:open_selected())
+        table.cellClicked.connect(lambda row,col: self._audit_register_detail(table.item(row,0).data(Qt.ItemDataRole.UserRole)) if col==0 and table.item(row,0) else None)
         for ctl in [search,status,typ,dept]:
             if isinstance(ctl,QLineEdit): ctl.textChanged.connect(load)
             else: ctl.currentTextChanged.connect(load)
         load()
+
+    def _audit_register_detail(self, audit_id):
+        a, fs = self._audit_report_data(audit_id)
+        if not a:
+            return
+        d=QDialog(self); d.setWindowTitle(f"Audit Register — {safe(a['number'])}"); d.resize(1180,820)
+        lay=QVBoxLayout(d)
+        head=QLabel(f"AUDIT REGISTER — {safe(a['number'])}"); head.setStyleSheet("font-size:21px;font-weight:bold;color:#17365D;padding:6px;"); lay.addWidget(head)
+        info=QTableWidget(0,2); info.setHorizontalHeaderLabels(["Audit Field","Value"]); info.horizontalHeader().setStretchLastSection(True); info.setAlternatingRowColors(True)
+        for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Audit Standard",a["standard"]),("Audit Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Status",a["status"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"])]:
+            r=info.rowCount(); info.insertRow(r); info.setItem(r,0,QTableWidgetItem(safe(k))); info.setItem(r,1,QTableWidgetItem(safe(v)))
+        info.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); lay.addWidget(info,1)
+        if fs:
+            lay.addWidget(QLabel("FINDINGS"))
+            ft=QTableWidget(0,9); ft.setHorizontalHeaderLabels(["No.","Standard","Clause","Sub-Clause","Type","Detail","Responsible","Location","Status / Target"]); ft.setAlternatingRowColors(True); ft.horizontalHeader().setStretchLastSection(True)
+            for f in fs:
+                r=ft.rowCount(); ft.insertRow(r); vals=[f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["clause"],f["sub_clause"],f["finding_type"],f["finding_detail"] or f["observation"],f["responsible"],f["location"] if "location" in f.keys() else "",("OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]) + (f" / {f['target_date']}" if f["target_date"] else "")]
+                for c,v in enumerate(vals): ft.setItem(r,c,QTableWidgetItem(safe(v)))
+            ft.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers); lay.addWidget(ft,2)
+        buttons=QHBoxLayout(); word=QPushButton("Generate Word"); excel=QPushButton("Generate Excel"); close=QPushButton("Close")
+        buttons.addWidget(word); buttons.addWidget(excel); buttons.addStretch(); buttons.addWidget(close); lay.addLayout(buttons)
+        word.clicked.connect(lambda:self._audit_export_word(audit_id)); excel.clicked.connect(lambda:self._audit_export_excel(audit_id)); close.clicked.connect(d.accept)
+        d.exec()
 
     def audit_type_selector(self, refresh):
         d=QDialog(self); d.setWindowTitle("Select Audit Type"); d.resize(560,320)
@@ -3150,30 +3176,38 @@ class MainWindow(QMainWindow):
         def make_finding(data=None):
             idx=len(finding_widgets)+1; box=QGroupBox(f"FINDING {idx}"); box.setStyleSheet("QGroupBox{font-size:15px;font-weight:bold;border:1px solid #B8C2CC;margin-top:10px;padding:10px;}QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 5px;}")
             form=QFormLayout(box); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-            ft=QComboBox(); ft.addItems(self._audit_finding_types()); cl=QComboBox(); sc=QComboBox(); detail=QTextEdit(); detail.setMinimumHeight(100); ca=QTextEdit(); ca.setMinimumHeight(90); rp=self._audit_person_combo(); status=QComboBox(); status.addItems(self._audit_finding_statuses()); td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
-            form.addRow("Finding Type:",ft); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Status:",status); form.addRow("Target Date:",td)
+            ft=QComboBox(); ft.addItems(self._audit_finding_types())
+            fs=QComboBox(); fs.addItems(self._audit_standards())
+            cl=QComboBox(); sc=QComboBox()
+            detail=QTextEdit(); detail.setMinimumHeight(100); ca=QTextEdit(); ca.setMinimumHeight(90)
+            rp=self._audit_person_combo(); rp.setEditable(True); rp.setInsertPolicy(QComboBox.InsertPolicy.NoInsert); rp.setCurrentIndex(0)
+            loc=QLineEdit(); loc.setPlaceholderText("Enter finding location...")
+            status=QComboBox(); status.addItems(self._audit_finding_statuses())
+            td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
+            form.addRow("Finding Type:",ft); form.addRow("Standard:",fs); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Location:",loc); form.addRow("Status:",status); form.addRow("Target Date:",td)
             evidence=QListWidget(); evidence.setMaximumHeight(110); eb=QHBoxLayout(); add=QPushButton("+ ADD ATTACHMENT"); open_a=QPushButton("View / Open"); rem=QPushButton("Delete Selected"); eb.addWidget(add); eb.addWidget(open_a); eb.addWidget(rem); ew=QWidget(); ee=QVBoxLayout(ew); ee.setContentsMargins(0,0,0,0); ee.addWidget(evidence); ee.addLayout(eb); form.addRow("Attachments:",ew)
             remove=QPushButton("Remove Finding"); form.addRow("",remove)
             def load_cl():
-                old=sc.currentText(); cl.blockSignals(True); cl.clear(); cl.addItems(list(clause_map().keys())); cl.blockSignals(False); load_sub()
+                cl.blockSignals(True); cl.clear(); cl.addItems(list(self._audit_clause_map(fs.currentText()).keys())); cl.blockSignals(False); load_sub()
             def load_sub():
-                sc.clear(); sc.addItems(clause_map().get(cl.currentText(),[]))
-            standard.currentTextChanged.connect(load_cl); cl.currentTextChanged.connect(load_sub); load_cl()
+                sc.clear(); sc.addItems(self._audit_clause_map(fs.currentText()).get(cl.currentText(),[]))
+            fs.currentTextChanged.connect(load_cl); cl.currentTextChanged.connect(load_sub); load_cl()
             if data:
-                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"]));
+                fs.setCurrentText(safe(data["finding_standard"]) if "finding_standard" in data.keys() and safe(data["finding_standard"]) else safe(existing["standard"]) if existing else self._audit_standards()[0]); load_cl()
+                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"])); loc.setText(safe(data["location"]) if "location" in data.keys() else "")
                 if data["target_date"]:
                     try: td.setDate(date.fromisoformat(data["target_date"]))
                     except Exception: pass
                 pid=data["responsible_person_id"] if "responsible_person_id" in data.keys() else None
                 if pid is not None:
                     ix=rp.findData(pid); rp.setCurrentIndex(ix if ix>=0 else 0)
-                # Load already-saved finding evidence into the draft. Keeping the real path
-                # in the list lets Save preserve the attachment without duplicating it.
+                if not pid and safe(data.get("responsible", "")):
+                    rp.setEditText(safe(data["responsible"]))
                 if existing:
                     for ar in self._audit_attachment_rows(existing["id"], data["id"]):
                         fp=safe(ar["file_path"])
                         if fp: evidence.addItem(fp)
-            finding_widgets.append({"box":box,"type":ft,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"status":status,"target":td,"attachments":evidence,"add":add,"remove":remove,"data":data})
+            finding_widgets.append({"box":box,"type":ft,"standard":fs,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"location":loc,"status":status,"target":td,"attachments":evidence,"add":add,"remove":remove,"data":data})
             def choose():
                 paths,_=QFileDialog.getOpenFileNames(d,"Select Finding Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
                 for p in paths: evidence.addItem(p)
@@ -3230,8 +3264,8 @@ class MainWindow(QMainWindow):
                 reference.setText(next_number("HSE-AUD","audits"))
             if refresh is None: refresh=lambda:None
 
-        buttons=QHBoxLayout(); save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); report=QPushButton("Generate Professional Report"); word=QPushButton("Generate Word"); excel=QPushButton("Generate Excel"); close=QPushButton("Close")
-        for b in [save,submit,report,word,excel,close]: buttons.addWidget(b)
+        buttons=QHBoxLayout(); save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); close=QPushButton("Close")
+        for b in [save,submit,close]: buttons.addWidget(b)
         outer.addLayout(buttons)
         if readonly: save.setEnabled(False); submit.setEnabled(False)
         def validate_submission():
@@ -3240,7 +3274,7 @@ class MainWindow(QMainWindow):
             if not standard.currentText(): return "Audit Standard is required."
             if not finding_widgets: return "At least one finding is required."
             for i,x in enumerate(finding_widgets,1):
-                required=[(x["type"].currentText(),"Finding Type"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].currentText(),"Responsible Person")]
+                required=[(x["type"].currentText(),"Finding Type"),(x["standard"].currentText(),"Standard"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].currentText().strip(),"Responsible Person"),(x["location"].text().strip(),"Location")]
                 for val,label in required:
                     if not val or val.startswith("--") or val.startswith("No active"): return f"Finding {i}: {label} is required."
                 if not x["target"].date(): return f"Finding {i}: Target Date is required."
@@ -3279,8 +3313,8 @@ class MainWindow(QMainWindow):
                     db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
                 for n,x in enumerate(finding_widgets,1):
                     pid=x["person"].currentData()
-                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,target_date,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (existing["id"],n,x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].currentText() if x["person"].currentIndex()>0 else "",pid,x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
+                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].currentText().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
                     fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
                     paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
                     for fp in paths:
@@ -3302,13 +3336,6 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logging.exception("Audit save failed"); QMessageBox.critical(d,"Save Error",f"Unable to save audit.\n\n{e}")
         save.clicked.connect(lambda:save_audit(False)); submit.clicked.connect(lambda:save_audit(True)); close.clicked.connect(d.reject)
-        def do_report(kind):
-            if not existing: save_audit(False)
-            if existing:
-                if kind=="pdf": self._audit_export_pdf(existing["id"])
-                elif kind=="word": self._audit_export_word(existing["id"])
-                else: self._audit_export_excel(existing["id"])
-        report.clicked.connect(lambda:do_report("pdf")); word.clicked.connect(lambda:do_report("word")); excel.clicked.connect(lambda:do_report("excel"))
         d.exec()
 
     def _audit_add_general_attachment(self, audit, widget):
@@ -3387,15 +3414,15 @@ class MainWindow(QMainWindow):
             for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"] )]:
                 cells=info.add_row().cells; cells[0].text=k; cells[1].text=safe(v)
             doc.add_heading("Findings Summary",level=1); t=doc.add_table(rows=1,cols=7); t.alignment=WD_TABLE_ALIGNMENT.CENTER
-            for i,h in enumerate(["Finding","Type","Clause","Sub-Clause","Responsible","Status","Target Date"]): t.rows[0].cells[i].text=h
+            for i,h in enumerate(["Finding","Standard","Type","Clause","Sub-Clause","Responsible","Location","Status","Target Date"]): t.rows[0].cells[i].text=h
             for f in fs:
                 cells=t.add_row().cells
-                for i,v in enumerate([f["finding_number"],f["finding_type"],f["clause"],f["sub_clause"],f["responsible"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]]): cells[i].text=safe(v)
+                for i,v in enumerate([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]]): cells[i].text=safe(v)
             doc.add_heading("Detailed Findings",level=1)
             for f in fs:
                 doc.add_heading(f"Finding {f['finding_number']} — {safe(f['finding_type'])}",level=2)
                 tt=doc.add_table(rows=0,cols=2)
-                for k,v in [("Clause",f["clause"]),("Sub-Clause",f["sub_clause"]),("Finding Detail",f["finding_detail"] or f["observation"]),("Corrective Action",f["corrective_action"]),("Responsible Person",f["responsible"]),("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]),("Target Date",f["target_date"])]:
+                for k,v in [("Standard",f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),("Clause",f["clause"]),("Sub-Clause",f["sub_clause"]),("Finding Detail",f["finding_detail"] or f["observation"]),("Corrective Action",f["corrective_action"]),("Responsible Person",f["responsible"]),("Location",f["location"] if "location" in f.keys() else ""),("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]),("Target Date",f["target_date"])]:
                     c=tt.add_row().cells; c[0].text=k; c[1].text=safe(v)
                 ars=self._audit_attachment_rows(audit_id,f["id"])
                 if ars:
@@ -3422,8 +3449,8 @@ class MainWindow(QMainWindow):
             thin=Side(style="thin",color="808080")
             for row in ws.iter_rows():
                 for c in row: c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
-            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Status","Target Date"])
-            for f in fs:fws.append([f["finding_number"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]])
+            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date"])
+            for f in fs:fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]])
             aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Attachment Name","File Type","Uploaded By","Upload Date"])
             for ar in self._audit_attachment_rows(audit_id): aws.append(["Audit Level",Path(safe(ar["file_path"])).name,Path(safe(ar["file_path"])).suffix.lower(),safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
             for f in fs:
