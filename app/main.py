@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox, QTableWidget, QTableWidgetItem, QMessageBox,
     QFileDialog, QDateEdit, QSpinBox, QDoubleSpinBox, QGroupBox,
     QSplitter, QListWidget, QStackedWidget, QDialog, QDialogButtonBox,
-    QHeaderView, QAbstractItemView, QCheckBox, QScrollArea
+    QHeaderView, QAbstractItemView, QCheckBox, QScrollArea, QTabWidget, QListWidgetItem
 )
 
 from reportlab.lib import colors
@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.11"
+APP_VERSION = "1.4.14"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -319,6 +319,51 @@ class Database:
         incident_attachment_cols = [r[1] for r in self.conn.execute("PRAGMA table_info(incident_attachments)").fetchall()]
         if "remark" not in incident_attachment_cols:
             self.conn.execute("ALTER TABLE incident_attachments ADD COLUMN remark TEXT DEFAULT ''")
+
+        # Audit module extensions are additive and isolated from all other modules.
+        audit_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audits)").fetchall()}
+        audit_extra = {
+            "title": "TEXT DEFAULT ''",
+            "created_by": "TEXT DEFAULT ''",
+            "updated_at": "TEXT DEFAULT ''",
+            "submitted_at": "TEXT DEFAULT ''",
+            "auditor_position": "TEXT DEFAULT ''",
+            "auditor_date": "TEXT DEFAULT ''",
+            "reviewer": "TEXT DEFAULT ''",
+            "reviewer_position": "TEXT DEFAULT ''",
+            "reviewer_date": "TEXT DEFAULT ''",
+            "approver": "TEXT DEFAULT ''",
+            "approver_position": "TEXT DEFAULT ''",
+            "approver_date": "TEXT DEFAULT ''"
+        }
+        for col, definition in audit_extra.items():
+            if col not in audit_cols:
+                self.conn.execute(f"ALTER TABLE audits ADD COLUMN {col} {definition}")
+
+        finding_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_findings)").fetchall()}
+        finding_extra = {
+            "finding_number": "INTEGER DEFAULT 1",
+            "finding_detail": "TEXT DEFAULT ''",
+            "responsible_person_id": "INTEGER",
+            "created_at": "TEXT DEFAULT ''",
+            "updated_at": "TEXT DEFAULT ''"
+        }
+        for col, definition in finding_extra.items():
+            if col not in finding_cols:
+                self.conn.execute(f"ALTER TABLE audit_findings ADD COLUMN {col} {definition}")
+
+        audit_attachment_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(audit_attachments)").fetchall()}
+        if "finding_id" not in audit_attachment_cols:
+            self.conn.execute("ALTER TABLE audit_attachments ADD COLUMN finding_id INTEGER")
+        if "uploaded_by" not in audit_attachment_cols:
+            self.conn.execute("ALTER TABLE audit_attachments ADD COLUMN uploaded_by TEXT DEFAULT ''")
+        if "uploaded_at" not in audit_attachment_cols:
+            self.conn.execute("ALTER TABLE audit_attachments ADD COLUMN uploaded_at TEXT DEFAULT ''")
+
+        self.conn.execute("""CREATE TABLE IF NOT EXISTS audit_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, audit_id INTEGER NOT NULL, action TEXT,
+            user_name TEXT, details TEXT, timestamp TEXT,
+            FOREIGN KEY(audit_id) REFERENCES audits(id) ON DELETE CASCADE)""")
         self.conn.commit()
 
     def execute(self, sql, params=()):
@@ -2918,135 +2963,505 @@ class MainWindow(QMainWindow):
             except Exception as e: logging.exception("Incident save failed"); QMessageBox.critical(dialog,"Save Error",f"Unable to save investigation.\n\n{e}")
         save_draft.clicked.connect(lambda:save("Draft")); save_final.clicked.connect(lambda:save("Closed")); save_exit.clicked.connect(lambda:save("Draft")); dialog.exec()
 
+    # ========================================================
+    # AUDIT MODULE - self-contained implementation
+    # ========================================================
+    def _audit_setting_list(self, key, default):
+        raw = db.setting(key, "")
+        if raw:
+            try:
+                value = json.loads(raw)
+                if isinstance(value, list) and value:
+                    return [str(x) for x in value]
+            except Exception:
+                pass
+        return list(default)
+
+    def _audit_employees(self):
+        try:
+            return db.fetchall("SELECT id,name,designation,department FROM employees WHERE active=1 ORDER BY name")
+        except Exception:
+            return []
+
+    def _audit_person_combo(self, include_blank=True):
+        combo=QComboBox()
+        if include_blank: combo.addItem("-- Select Person --", None)
+        people=self._audit_employees()
+        if people:
+            for r in people:
+                label=safe(r["name"])
+                if safe(r["designation"]): label += f" — {safe(r['designation'])}"
+                combo.addItem(label, r["id"])
+        else:
+            combo.addItem("No active employees configured", None)
+        return combo
+
+    def _audit_standards(self):
+        return self._audit_setting_list("audit_standards", ["ISO 9001", "ISO 14001", "ISO 45001", "Other"])
+
+    def _audit_types(self):
+        return self._audit_setting_list("audit_types", AUDIT_TYPES)
+
+    def _audit_finding_types(self):
+        return self._audit_setting_list("audit_finding_types", [
+            "Major Nonconformity", "Minor Nonconformity", "Observation",
+            "Opportunity for Improvement", "Positive Finding"])
+
+    def _audit_finding_statuses(self):
+        return self._audit_setting_list("audit_finding_statuses", [
+            "Open", "In Progress", "Submitted for Verification", "Verified", "Closed", "Overdue"])
+
+    def _audit_clause_map(self, standard):
+        raw=db.setting("audit_clause_map", "")
+        if raw:
+            try:
+                data=json.loads(raw)
+                if isinstance(data,dict) and standard in data and isinstance(data[standard],dict):
+                    return data[standard]
+            except Exception:
+                pass
+        return ISO_CLAUSES.get(standard,{})
+
+    def _audit_log(self, audit_id, action, details="", user=None):
+        user = user or db.setting("current_user", "") or db.setting("default_observer", "") or "System User"
+        db.execute("INSERT INTO audit_history(audit_id,action,user_name,details,timestamp) VALUES(?,?,?,?,?)",
+                   (audit_id,action,user,details,datetime.now().isoformat(timespec="seconds")))
+
+    def _audit_attachment_copy(self, paths, audit_number, audit_id, finding_id=None, uploaded_by=""):
+        saved=[]
+        for path in paths or []:
+            try:
+                source=Path(path)
+                if not source.exists(): continue
+                prefix=f"{audit_number}_{'F'+str(finding_id)+'_' if finding_id else ''}"
+                destination=ATTACH_DIR / f"{prefix}{source.name}"
+                n=1
+                while destination.exists():
+                    destination=ATTACH_DIR / f"{prefix}{n}_{source.name}"; n+=1
+                shutil.copy2(source,destination)
+                db.execute("INSERT INTO audit_attachments(audit_id,finding_id,file_path,attachment_type,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
+                           (audit_id,finding_id,str(destination),"Evidence",uploaded_by,datetime.now().isoformat(timespec="seconds")))
+                saved.append(str(destination))
+            except Exception:
+                logging.exception("Audit attachment copy failed")
+        return saved
+
+    def _audit_attachment_rows(self, audit_id, finding_id=None):
+        if finding_id is None:
+            return db.fetchall("SELECT * FROM audit_attachments WHERE audit_id=? AND (finding_id IS NULL OR finding_id=0) ORDER BY id",(audit_id,))
+        return db.fetchall("SELECT * FROM audit_attachments WHERE audit_id=? AND finding_id=? ORDER BY id",(audit_id,finding_id))
+
     def audits(self):
         w,layout=self.page("Audit Register")
-        toolbar=QHBoxLayout(); btns={}
-        for text in ["+ New Audit","Delete Selected","Export CSV","Export Excel","Export PDF","Export Word"]:
-            b=QPushButton(text); toolbar.addWidget(b); btns[text]=b
-        layout.addLayout(toolbar)
-        table=QTableWidget(); headers=["ID","Number","Date","Standard","Audit Type","Project","Auditor","Status","Attachments"]; table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); table.setSelectionBehavior(QAbstractItemView.SelectRows); layout.addWidget(table)
+        top=QHBoxLayout()
+        title=QLabel("AUDIT REGISTER")
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;padding:6px;")
+        top.addWidget(title); top.addStretch()
+        new_btn=QPushButton("+ NEW AUDIT"); new_btn.setMinimumHeight(40); new_btn.setStyleSheet("font-weight:bold;padding:8px 18px;")
+        settings_btn=QPushButton("Audit Settings")
+        top.addWidget(settings_btn); top.addWidget(new_btn); layout.addLayout(top)
+
+        filters=QHBoxLayout()
+        search=QLineEdit(); search.setPlaceholderText("Search reference, title, department, location or auditor..."); filters.addWidget(search,2)
+        status=QComboBox(); status.addItems(["All Statuses","Draft","Submitted"]); filters.addWidget(status)
+        typ=QComboBox(); typ.addItem("All Audit Types"); typ.addItems(self._audit_types()); filters.addWidget(typ)
+        dept=QComboBox(); dept.addItem("All Departments")
+        try:
+            deps=sorted({safe(r["department"]) for r in db.fetchall("SELECT department FROM employees WHERE active=1") if safe(r["department"])})
+            dept.addItems(deps)
+        except Exception: pass
+        filters.addWidget(dept)
+        layout.addLayout(filters)
+
+        table=QTableWidget(); headers=["Audit Reference","Audit Type","Audit Title","Audit Date","Department","Location","Auditor","Findings","Status","Created By","Last Updated","Actions"]
+        table.setColumnCount(len(headers)); table.setHorizontalHeaderLabels(headers); table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows); table.setAlternatingRowColors(True); table.setSortingEnabled(True)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); table.horizontalHeader().setStretchLastSection(True); layout.addWidget(table,1)
+
         def load():
-            rows=db.fetchall("SELECT * FROM audits ORDER BY id DESC"); table.setRowCount(len(rows))
-            for r,row in enumerate(rows):
-                count=db.fetchone("SELECT COUNT(*) c FROM audit_attachments WHERE audit_id=?",(row["id"],))["c"]; vals=[row["id"],row["number"],row["audit_date"],row["standard"],row["audit_type"],row["project"],row["lead_auditor"],row["status"],count]
-                for c,v in enumerate(vals):table.setItem(r,c,QTableWidgetItem(safe(v)))
-        btns["+ New Audit"].clicked.connect(lambda:self.audit_form(load)); btns["Delete Selected"].clicked.connect(lambda:self.delete_selected_record(table,"audits","audit_attachments","Audit",load)); btns["Export CSV"].clicked.connect(lambda:self.export_csv("audits")); btns["Export Excel"].clicked.connect(lambda:self.export_excel("audits")); btns["Export PDF"].clicked.connect(lambda:self.export_pdf("audits")); btns["Export Word"].clicked.connect(lambda:self.export_docx("audits")); load()
+            q="SELECT * FROM audits ORDER BY id DESC"; rows=db.fetchall(q); data=[]
+            for r in rows:
+                if status.currentText()!="All Statuses" and safe(r["status"])!=status.currentText(): continue
+                if typ.currentText()!="All Audit Types" and safe(r["audit_type"])!=typ.currentText(): continue
+                if dept.currentText()!="All Departments" and safe(r["department"])!=dept.currentText(): continue
+                needle=search.text().strip().lower()
+                hay=" ".join(safe(r[k]) for k in ["number","audit_type","title","audit_date","department","location","auditor","lead_auditor","status","created_by"] if k in r.keys()).lower()
+                if needle and needle not in hay: continue
+                data.append(r)
+            table.setSortingEnabled(False); table.setRowCount(len(data))
+            for i,r in enumerate(data):
+                count=db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=?",(r["id"],))["c"]
+                vals=[r["number"],r["audit_type"],r["title"],r["audit_date"],r["department"],r["location"],r["auditor"] or r["lead_auditor"],count,r["status"],r["created_by"],r["updated_at"] or r["created_at"],"View" if r["status"]=="Submitted" else "Edit"]
+                for c,v in enumerate(vals):
+                    item=QTableWidgetItem(safe(v)); item.setData(Qt.ItemDataRole.UserRole,r["id"]); table.setItem(i,c,item)
+            table.setSortingEnabled(True)
+        def selected_id():
+            row=table.currentRow(); return table.item(row,0).data(Qt.ItemDataRole.UserRole) if row>=0 and table.item(row,0) else None
+        def open_selected():
+            aid=selected_id()
+            if aid: self.audit_workspace(aid, load)
+        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings)
+        table.cellDoubleClicked.connect(lambda *_:open_selected())
+        for ctl in [search,status,typ,dept]:
+            if isinstance(ctl,QLineEdit): ctl.textChanged.connect(load)
+            else: ctl.currentTextChanged.connect(load)
+        load()
 
+    def audit_type_selector(self, refresh):
+        d=QDialog(self); d.setWindowTitle("Select Audit Type"); d.resize(560,320)
+        lay=QVBoxLayout(d); h=QLabel("SELECT AUDIT TYPE"); h.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:10px;"); lay.addWidget(h)
+        info=QLabel("Select the audit type before opening the Audit Workspace."); info.setWordWrap(True); lay.addWidget(info)
+        combo=QComboBox(); combo.addItems(self._audit_types()); lay.addWidget(combo)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Ok|QDialogButtonBox.StandardButton.Cancel); lay.addWidget(buttons)
+        buttons.accepted.connect(lambda:(d.accept(), self.audit_workspace(None,refresh,combo.currentText())))
+        buttons.rejected.connect(d.reject); d.exec()
 
-    def audit_form(self, refresh):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("New Audit")
-        dialog.resize(1000, 900)
-        dialog.setMinimumSize(920, 760)
-        outer = QVBoxLayout(dialog)
+    def audit_workspace(self, audit_id=None, refresh=None, selected_type=None):
+        existing=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)) if audit_id else None
+        if existing and existing["status"]=="Submitted": readonly=True
+        else: readonly=False
+        d=QDialog(self); d.setWindowTitle("Audit Workspace"); d.resize(1250,900); d.setMinimumSize(1050,760)
+        outer=QVBoxLayout(d)
+        banner=QHBoxLayout(); head=QLabel("AUDIT WORKSPACE"); head.setStyleSheet("font-size:22px;font-weight:bold;color:#17365D;"); banner.addWidget(head); banner.addStretch(); outer.addLayout(banner)
+        tabs=QTabWidget(); outer.addWidget(tabs,1)
+        overview=QWidget(); of=QFormLayout(overview); of.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        audit_type=QComboBox(); audit_type.addItems(self._audit_types());
+        title=QLineEdit(); audit_date=QDateEdit(); audit_date.setCalendarPopup(True); audit_date.setDisplayFormat("dd-MMM-yyyy"); audit_date.setDate(datetime.now().date())
+        reference=QLineEdit(); reference.setReadOnly(True); department=QComboBox(); department.setEditable(True); location=QComboBox(); location.setEditable(True); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit();
+        departments=sorted({safe(r["department"]) for r in db.fetchall("SELECT department FROM employees WHERE active=1") if safe(r["department"])})
+        department.addItems(departments)
+        locations=sorted({safe(r["location"]) for r in db.fetchall("SELECT location FROM projects WHERE active=1") if "location" in r.keys() and safe(r["location"])})
+        location.addItems(locations)
+        of.addRow("Audit Type:",audit_type); of.addRow("Audit Reference:",reference); of.addRow("Audit Title:",title); of.addRow("Audit Date:",audit_date); of.addRow("Department:",department); of.addRow("Location:",location); of.addRow("Audit Standard:",standard); of.addRow("Audit Scope:",scope); of.addRow("Audit Criteria:",criteria)
+        tabs.addTab(overview,"Overview")
 
-        title = QLabel("AUDIT REGISTER - NEW AUDIT")
-        title.setStyleSheet("font-size:20px;font-weight:bold;color:#17365D;padding:6px;")
-        outer.addWidget(title)
+        findings_tab=QWidget(); fl=QVBoxLayout(findings_tab); finding_scroll=QScrollArea(); finding_scroll.setWidgetResizable(True); finding_host=QWidget(); finding_layout=QVBoxLayout(finding_host); finding_layout.setAlignment(Qt.AlignmentFlag.AlignTop); finding_scroll.setWidget(finding_host); fl.addWidget(finding_scroll,1); add_finding=QPushButton("+ ADD FINDING"); add_finding.setMinimumHeight(40); fl.addWidget(add_finding); tabs.addTab(findings_tab,"Findings")
+        review=QWidget(); rf=QFormLayout(review); rf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        def person_row(label):
+            row=QHBoxLayout(); c=self._audit_person_combo(); pos=QLineEdit(); dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); row.addWidget(c,2); row.addWidget(pos,1); row.addWidget(dt); box=QWidget(); box.setLayout(row); rf.addRow(label,box); return c,pos,dt
+        auditor, auditor_pos, auditor_date=person_row("Auditor (Name / Position / Date):")
+        reviewer, reviewer_pos, reviewer_date=person_row("Reviewed By:")
+        approver, approver_pos, approver_date=person_row("Approved By:")
+        tabs.addTab(review,"Review & Approval")
+        att_tab=QWidget(); al=QVBoxLayout(att_tab); attach_list=QListWidget(); al.addWidget(QLabel("AUDIT-LEVEL ATTACHMENTS")); al.addWidget(attach_list,1); att_btns=QHBoxLayout(); add_att=QPushButton("+ ADD ATTACHMENT"); open_att=QPushButton("View / Open"); del_att=QPushButton("Delete Selected"); att_btns.addWidget(add_att); att_btns.addWidget(open_att); att_btns.addWidget(del_att); al.addLayout(att_btns); tabs.addTab(att_tab,"Attachments")
+        hist_tab=QWidget(); hl=QVBoxLayout(hist_tab); history=QTableWidget(); history.setColumnCount(4); history.setHorizontalHeaderLabels(["Date","User","Action","Details"]); history.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents); history.horizontalHeader().setStretchLastSection(True); hl.addWidget(history); tabs.addTab(hist_tab,"History")
 
-        scroll_area = QScrollArea(); scroll_area.setWidgetResizable(True)
-        content = QWidget(); form = QFormLayout(content)
-        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        edits = {}
+        finding_widgets=[]
+        def clause_map(): return self._audit_clause_map(standard.currentText())
+        def make_finding(data=None):
+            idx=len(finding_widgets)+1; box=QGroupBox(f"FINDING {idx}"); box.setStyleSheet("QGroupBox{font-size:15px;font-weight:bold;border:1px solid #B8C2CC;margin-top:10px;padding:10px;}QGroupBox::title{subcontrol-origin:margin;left:10px;padding:0 5px;}")
+            form=QFormLayout(box); form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            ft=QComboBox(); ft.addItems(self._audit_finding_types()); cl=QComboBox(); sc=QComboBox(); detail=QTextEdit(); detail.setMinimumHeight(100); ca=QTextEdit(); ca.setMinimumHeight(90); rp=self._audit_person_combo(); status=QComboBox(); status.addItems(self._audit_finding_statuses()); td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
+            form.addRow("Finding Type:",ft); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Status:",status); form.addRow("Target Date:",td)
+            evidence=QListWidget(); evidence.setMaximumHeight(110); eb=QHBoxLayout(); add=QPushButton("+ ADD ATTACHMENT"); open_a=QPushButton("View / Open"); rem=QPushButton("Delete Selected"); eb.addWidget(add); eb.addWidget(open_a); eb.addWidget(rem); ew=QWidget(); ee=QVBoxLayout(ew); ee.setContentsMargins(0,0,0,0); ee.addWidget(evidence); ee.addLayout(eb); form.addRow("Attachments:",ew)
+            remove=QPushButton("Remove Finding"); form.addRow("",remove)
+            def load_cl():
+                old=sc.currentText(); cl.blockSignals(True); cl.clear(); cl.addItems(list(clause_map().keys())); cl.blockSignals(False); load_sub()
+            def load_sub():
+                sc.clear(); sc.addItems(clause_map().get(cl.currentText(),[]))
+            standard.currentTextChanged.connect(load_cl); cl.currentTextChanged.connect(load_sub); load_cl()
+            if data:
+                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"]));
+                if data["target_date"]:
+                    try: td.setDate(date.fromisoformat(data["target_date"]))
+                    except Exception: pass
+                pid=data["responsible_person_id"] if "responsible_person_id" in data.keys() else None
+                if pid is not None:
+                    ix=rp.findData(pid); rp.setCurrentIndex(ix if ix>=0 else 0)
+                # Load already-saved finding evidence into the draft. Keeping the real path
+                # in the list lets Save preserve the attachment without duplicating it.
+                if existing:
+                    for ar in self._audit_attachment_rows(existing["id"], data["id"]):
+                        fp=safe(ar["file_path"])
+                        if fp: evidence.addItem(fp)
+            finding_widgets.append({"box":box,"type":ft,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"status":status,"target":td,"attachments":evidence,"add":add,"remove":remove,"data":data})
+            def choose():
+                paths,_=QFileDialog.getOpenFileNames(d,"Select Finding Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
+                for p in paths: evidence.addItem(p)
+            add.clicked.connect(choose)
+            open_a.clicked.connect(lambda: self._audit_open_attachment(evidence))
+            rem.clicked.connect(lambda: evidence.takeItem(evidence.currentRow()) if evidence.currentRow()>=0 else None)
+            remove.clicked.connect(lambda: remove_finding(box))
+            finding_layout.addWidget(box)
+            box.setEnabled(not readonly)
+        def remove_finding(box):
+            if readonly:return
+            for i,x in enumerate(finding_widgets):
+                if x["box"] is box:
+                    box.setParent(None); box.deleteLater(); finding_widgets.pop(i); break
+            for n,x in enumerate(finding_widgets,1): x["box"].setTitle(f"FINDING {n}")
+        add_finding.clicked.connect(lambda:make_finding())
 
-        def edit(name):
-            e = QLineEdit(); edits[name] = e
-            form.addRow(name.replace("_", " ").title() + ":", e)
-            return e
+        def load_audit():
+            nonlocal existing
+            if not existing:return
+            audit_type.setCurrentText(safe(existing["audit_type"])); reference.setText(safe(existing["number"])); title.setText(safe(existing["title"])); department.setCurrentText(safe(existing["department"])); location.setCurrentText(safe(existing["location"])); standard.setCurrentText(safe(existing["standard"])); scope.setPlainText(safe(existing["scope"])); criteria.setPlainText(safe(existing["criteria"]))
+            try:audit_date.setDate(date.fromisoformat(safe(existing["audit_date"])))
+            except Exception:pass
+            for combo, name in [(auditor,"auditor"),(reviewer,"reviewer"),(approver,"approver")]:
+                val=safe(existing[name]); ix=combo.findText(val); combo.setCurrentIndex(ix if ix>=0 else 0)
+            auditor_pos.setText(safe(existing["auditor_position"])); reviewer_pos.setText(safe(existing["reviewer_position"])); approver_pos.setText(safe(existing["approver_position"]))
+            for widget,key in [(auditor_date,"auditor_date"),(reviewer_date,"reviewer_date"),(approver_date,"approver_date")]:
+                try: widget.setDate(date.fromisoformat(safe(existing[key])))
+                except Exception: pass
+            for r in db.fetchall("SELECT * FROM audit_findings WHERE audit_id=? ORDER BY finding_number,id",(existing["id"],)): make_finding(r)
+            if not finding_widgets: make_finding()
+            load_attachments(); load_history()
+        def load_attachments():
+            attach_list.clear()
+            if not existing:return
+            for a in self._audit_attachment_rows(existing["id"]):
+                item=QListWidgetItem(Path(safe(a["file_path"])).name); item.setData(Qt.ItemDataRole.UserRole,a["id"]); attach_list.addItem(item)
+        def load_history():
+            if not existing:return
+            rows=db.fetchall("SELECT timestamp,user_name,action,details FROM audit_history WHERE audit_id=? ORDER BY id",(existing["id"],)); history.setRowCount(len(rows))
+            for i,r in enumerate(rows):
+                for c,v in enumerate([r["timestamp"],r["user_name"],r["action"],r["details"]]): history.setItem(i,c,QTableWidgetItem(safe(v)))
 
-        standard = QComboBox(); standard.addItems(["ISO 45001", "ISO 14001"])
-        form.addRow("Standard:", standard)
-        audit_type = QComboBox(); audit_type.addItems(AUDIT_TYPES)
-        form.addRow("Audit Type:", audit_type)
-        for name in ["project", "location", "department", "auditor", "lead_auditor", "auditee", "start_time", "end_time"]:
-            edit(name)
+        add_att.clicked.connect(lambda:self._audit_add_general_attachment(existing,attach_list) if existing and not readonly else None)
+        open_att.clicked.connect(lambda:self._audit_open_attachment(attach_list, audit_id=existing["id"] if existing else None))
+        del_att.clicked.connect(lambda:self._audit_delete_general_attachment(existing,attach_list) if existing and not readonly else None)
+        if existing: load_audit()
+        else: make_finding()
+        if existing and readonly:
+            overview.setEnabled(False); review.setEnabled(False); add_finding.setEnabled(False); add_att.setEnabled(False); open_att.setEnabled(True); del_att.setEnabled(False)
+            d.setWindowTitle(f"Audit View — {existing['number']} — READ ONLY")
+        else:
+            if not existing:
+                reference.setText(next_number("HSE-AUD","audits"))
+            if refresh is None: refresh=lambda:None
 
-        scope = QTextEdit(); scope.setMinimumHeight(70); form.addRow("Scope:", scope)
-        objective = QTextEdit(); objective.setMinimumHeight(70); form.addRow("Objective:", objective)
-        criteria = QTextEdit(); criteria.setMinimumHeight(70); form.addRow("Audit Criteria:", criteria)
-
-        clause = QComboBox()
-        sub_clause = QComboBox()
-        form.addRow("ISO Clause:", clause)
-        form.addRow("ISO Sub-Clause:", sub_clause)
-
-        def load_clauses():
-            clause.blockSignals(True)
-            clause.clear()
-            clause.addItems(list(ISO_CLAUSES.get(standard.currentText(), {}).keys()))
-            clause.blockSignals(False)
-            load_subclauses()
-
-        def load_subclauses():
-            sub_clause.clear()
-            items = ISO_CLAUSES.get(standard.currentText(), {}).get(clause.currentText(), [])
-            sub_clause.addItems(items)
-
-        standard.currentTextChanged.connect(load_clauses)
-        clause.currentTextChanged.connect(load_subclauses)
-        load_clauses()
-
-        requirement = QTextEdit(); requirement.setMinimumHeight(70); form.addRow("Requirement / Criterion:", requirement)
-        finding_type = QComboBox(); finding_type.addItems(FINDING_TYPES); form.addRow("Finding Type:", finding_type)
-        finding = QTextEdit(); finding.setMinimumHeight(90); form.addRow("Finding / Evidence:", finding)
-        risk = QTextEdit(); risk.setMinimumHeight(70); form.addRow("Risk / Impact:", risk)
-        corrective = QTextEdit(); corrective.setMinimumHeight(70); form.addRow("Corrective Action:", corrective)
-        responsible = QLineEdit(); form.addRow("Responsible Person:", responsible)
-        target = QLineEdit(); form.addRow("Target Date:", target)
-
-        attachment_paths = []; attachment_label = QLabel("No evidence files selected."); attachment_label.setWordWrap(True)
-        attach = QPushButton("Attach Audit Evidence Files"); attach.setMinimumHeight(36)
-        def choose_files():
-            paths, _ = QFileDialog.getOpenFileNames(
-                dialog, "Select Audit Evidence", "",
-                "Evidence Files (*.png *.jpg *.jpeg *.bmp *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)"
-            )
-            if paths:
-                attachment_paths.clear(); attachment_paths.extend(paths)
-                attachment_label.setText("\n".join(Path(p).name for p in paths))
-        attach.clicked.connect(choose_files)
-        form.addRow("Evidence / Attachments:", attach); form.addRow("Selected Files:", attachment_label)
-
-        scroll_area.setWidget(content); outer.addWidget(scroll_area, 1)
-        buttons = QDialogButtonBox()
-        save_button = buttons.addButton("Save Audit", QDialogButtonBox.ButtonRole.AcceptRole)
-        cancel_button = buttons.addButton("Cancel", QDialogButtonBox.ButtonRole.RejectRole)
-        save_button.setMinimumHeight(40); cancel_button.setMinimumHeight(40)
-        outer.addWidget(buttons); cancel_button.clicked.connect(dialog.reject)
-
-        def save():
+        buttons=QHBoxLayout(); save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); report=QPushButton("Generate Professional Report"); word=QPushButton("Generate Word"); excel=QPushButton("Generate Excel"); close=QPushButton("Close")
+        for b in [save,submit,report,word,excel,close]: buttons.addWidget(b)
+        outer.addLayout(buttons)
+        if readonly: save.setEnabled(False); submit.setEnabled(False)
+        def validate_submission():
+            if not title.text().strip(): return "Audit Title is required."
+            if not audit_type.currentText(): return "Audit Type is required."
+            if not standard.currentText(): return "Audit Standard is required."
+            if not finding_widgets: return "At least one finding is required."
+            for i,x in enumerate(finding_widgets,1):
+                required=[(x["type"].currentText(),"Finding Type"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].currentText(),"Responsible Person")]
+                for val,label in required:
+                    if not val or val.startswith("--") or val.startswith("No active"): return f"Finding {i}: {label} is required."
+                if not x["target"].date(): return f"Finding {i}: Target Date is required."
+            if auditor.currentIndex()<=0 or reviewer.currentIndex()<=0 or approver.currentIndex()<=0: return "Auditor, Reviewer and Approver are required."
+            return ""
+        def save_audit(final=False):
+            nonlocal existing
+            if final:
+                msg=validate_submission()
+                if msg: QMessageBox.warning(d,"Validation",msg); return
+                if QMessageBox.question(d,"Confirm Submission","Once this audit is submitted, it will become read-only and cannot be edited.")!=QMessageBox.StandardButton.Yes: return
             try:
-                number = next_number("HSE-AUD", "audits")
-                db.execute("""
-                    INSERT INTO audits (number,audit_date,audit_type,standard,project,location,department,
-                        auditor,lead_auditor,auditee,scope,objective,criteria,start_time,end_time,created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    number, today(), audit_type.currentText(), standard.currentText(), edits["project"].text(),
-                    edits["location"].text(), edits["department"].text(), edits["auditor"].text(),
-                    edits["lead_auditor"].text(), edits["auditee"].text(), scope.toPlainText(),
-                    objective.toPlainText(), criteria.toPlainText(), edits["start_time"].text(),
-                    edits["end_time"].text(), datetime.now().isoformat()
-                ))
-                audit = db.fetchone("SELECT id FROM audits WHERE number=?", (number,))
-                db.execute("""
-                    INSERT INTO audit_findings (audit_id,clause,sub_clause,requirement,finding_type,
-                        observation,evidence,risk_impact,corrective_action,responsible,target_date)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    audit["id"], clause.currentText(), sub_clause.currentText(), requirement.toPlainText(),
-                    finding_type.currentText(), finding.toPlainText(), finding.toPlainText(), risk.toPlainText(),
-                    corrective.toPlainText(), responsible.text(), target.text()
-                ))
-                if attachment_paths:
-                    copy_attachments(attachment_paths, number, "audit_attachments", audit["id"])
-                dialog.accept(); refresh()
+                now=datetime.now().isoformat(timespec="seconds")
+                vals=(audit_date.date().toString("yyyy-MM-dd"),audit_type.currentText(),title.text().strip(),standard.currentText(),department.currentText().strip(),location.currentText().strip(),scope.toPlainText(),criteria.toPlainText(),auditor.currentText() if auditor.currentIndex()>0 else "",auditor_pos.text(),auditor_date.date().toString("yyyy-MM-dd"),reviewer.currentText() if reviewer.currentIndex()>0 else "",reviewer_pos.text(),reviewer_date.date().toString("yyyy-MM-dd"),approver.currentText() if approver.currentIndex()>0 else "",approver_pos.text(),approver_date.date().toString("yyyy-MM-dd"),"Submitted" if final else "Draft",now,now if final else "")
+                if not existing:
+                    db.execute("INSERT INTO audits(number,audit_date,audit_type,title,standard,department,location,scope,criteria,auditor,auditor_position,auditor_date,reviewer,reviewer_position,reviewer_date,approver,approver_position,approver_date,status,created_by,created_at,updated_at,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (reference.text(),)+vals[:18]+(db.setting("current_user","") or "System User",now,now,vals[-1]))
+                    existing=db.fetchone("SELECT * FROM audits WHERE number=?",(reference.text(),)); self._audit_log(existing["id"],"Audit created", "Draft" if not final else "Submitted")
+                else:
+                    db.execute("UPDATE audits SET audit_date=?,audit_type=?,title=?,standard=?,department=?,location=?,scope=?,criteria=?,auditor=?,auditor_position=?,auditor_date=?,reviewer=?,reviewer_position=?,reviewer_date=?,approver=?,approver_position=?,approver_date=?,status=?,updated_at=?,submitted_at=? WHERE id=?", vals+(existing["id"],))
+                    self._audit_log(existing["id"],"Audit submitted" if final else "Audit saved", "Status: Submitted" if final else "Status: Draft")
+                    db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
+                # If newly created, there are no finding rows yet; always write current finding state.
+                # Preserve the currently listed finding attachments while rebuilding the
+                # finding rows. Removing an attachment from the UI therefore removes it
+                # from the saved audit on the next draft save.
+                preserved_attachments=[]
+                if existing:
+                    for n,x in enumerate(finding_widgets,1):
+                        kept=[]
+                        for i in range(x["attachments"].count()):
+                            candidate=x["attachments"].item(i).text()
+                            if Path(candidate).exists(): kept.append(candidate)
+                        preserved_attachments.append((n,kept))
+                if existing and db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=?",(existing["id"],))["c"]>0:
+                    db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
+                for n,x in enumerate(finding_widgets,1):
+                    pid=x["person"].currentData()
+                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,target_date,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (existing["id"],n,x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].currentText() if x["person"].currentIndex()>0 else "",pid,x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
+                    fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
+                    paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
+                    for fp in paths:
+                        try:
+                            # Existing files in the application attachment store are retained
+                            # as-is; newly selected external files are copied into the store.
+                            if str(Path(fp).resolve()).startswith(str(ATTACH_DIR.resolve())):
+                                db.execute("INSERT INTO audit_attachments(audit_id,finding_id,file_path,attachment_type,uploaded_by,uploaded_at) VALUES(?,?,?,?,?,?)",
+                                           (existing["id"],fid,fp,"Evidence",db.setting("current_user","") or "System User",now))
+                            else:
+                                self._audit_attachment_copy([fp],reference.text(),existing["id"],fid,db.setting("current_user","") or "System User")
+                        except Exception:
+                            logging.exception("Unable to preserve audit finding attachment")
+                # General attachments already saved independently.
+                existing=db.fetchone("SELECT * FROM audits WHERE id=?",(existing["id"],))
+                if refresh: refresh()
+                if final: QMessageBox.information(d,"Audit Submitted","Audit submitted successfully and is now read-only."); d.accept()
+                else: QMessageBox.information(d,"Saved","Audit saved as Draft. You can edit it later.")
             except Exception as e:
-                logging.exception("Audit save failed")
-                QMessageBox.critical(dialog, "Save Error", f"Unable to save audit.\n\n{e}")
+                logging.exception("Audit save failed"); QMessageBox.critical(d,"Save Error",f"Unable to save audit.\n\n{e}")
+        save.clicked.connect(lambda:save_audit(False)); submit.clicked.connect(lambda:save_audit(True)); close.clicked.connect(d.reject)
+        def do_report(kind):
+            if not existing: save_audit(False)
+            if existing:
+                if kind=="pdf": self._audit_export_pdf(existing["id"])
+                elif kind=="word": self._audit_export_word(existing["id"])
+                else: self._audit_export_excel(existing["id"])
+        report.clicked.connect(lambda:do_report("pdf")); word.clicked.connect(lambda:do_report("word")); excel.clicked.connect(lambda:do_report("excel"))
+        d.exec()
 
-        save_button.clicked.connect(save)
-        dialog.exec()
+    def _audit_add_general_attachment(self, audit, widget):
+        paths,_=QFileDialog.getOpenFileNames(self,"Select Audit Attachment","","Documents and Evidence (*.pdf *.doc *.docx *.xls *.xlsx *.png *.jpg *.jpeg *.bmp *.txt);;All Files (*)")
+        if paths:
+            self._audit_attachment_copy(paths,audit["number"],audit["id"],None,db.setting("current_user","") or "System User"); self._audit_log(audit["id"],"Attachment added", "; ".join(Path(x).name for x in paths));
+            for p in paths: widget.addItem(Path(p).name)
+
+    def _audit_open_attachment(self, widget, audit_id=None):
+        item=widget.currentItem()
+        if not item:return
+        path=item.text()
+        if audit_id is not None:
+            row=db.fetchone("SELECT file_path FROM audit_attachments WHERE id=? AND audit_id=?",(item.data(Qt.ItemDataRole.UserRole),audit_id))
+            if row:path=safe(row["file_path"])
+        fp=Path(path)
+        if not fp.exists():
+            QMessageBox.warning(self,"Attachment","The attachment file could not be found.")
+            return
+        try:
+            if hasattr(os,"startfile"): os.startfile(str(fp))
+            else:
+                import subprocess
+                subprocess.Popen(["xdg-open",str(fp)])
+        except Exception as e:
+            QMessageBox.warning(self,"Attachment","Unable to open the attachment.\n\n"+str(e))
+
+    def _audit_delete_general_attachment(self,audit,widget):
+        item=widget.currentItem()
+        if not item:return
+        aid=item.data(Qt.ItemDataRole.UserRole)
+        row=db.fetchone("SELECT file_path FROM audit_attachments WHERE id=? AND audit_id=? AND (finding_id IS NULL OR finding_id=0)",(aid,audit["id"]))
+        if row:
+            try: Path(safe(row["file_path"])).unlink(missing_ok=True)
+            except Exception: pass
+            db.execute("DELETE FROM audit_attachments WHERE id=?",(aid,)); self._audit_log(audit["id"],"Attachment removed",item.text()); widget.takeItem(widget.row(item))
+
+    def audit_settings(self):
+        d=QDialog(self); d.setWindowTitle("Audit Settings"); d.resize(900,700); lay=QVBoxLayout(d)
+        tabs=QTabWidget(); lay.addWidget(tabs)
+        def list_editor(key, default, title):
+            w=QWidget(); l=QVBoxLayout(w); l.addWidget(QLabel(title)); lw=QListWidget(); lw.addItems(self._audit_setting_list(key,default)); l.addWidget(lw)
+            row=QHBoxLayout(); add=QLineEdit(); add.setPlaceholderText("Add value..."); ba=QPushButton("Add"); br=QPushButton("Remove Selected"); row.addWidget(add); row.addWidget(ba); row.addWidget(br); l.addLayout(row)
+            ba.clicked.connect(lambda: (lw.addItem(add.text().strip()),add.clear()) if add.text().strip() else None); br.clicked.connect(lambda: lw.takeItem(lw.currentRow()) if lw.currentRow()>=0 else None); tabs.addTab(w,title); return lw
+        types=list_editor("audit_types",AUDIT_TYPES,"Audit Types"); ftypes=list_editor("audit_finding_types",["Major Nonconformity","Minor Nonconformity","Observation","Opportunity for Improvement","Positive Finding"],"Finding Types"); statuses=list_editor("audit_finding_statuses",["Open","In Progress","Submitted for Verification","Verified","Closed","Overdue"],"Finding Statuses"); standards=list_editor("audit_standards",["ISO 9001","ISO 14001","ISO 45001","Other"],"Standards")
+        clause_tab=QWidget(); cl=QVBoxLayout(clause_tab); cl.addWidget(QLabel("Configure Standards → Clauses → Sub-Clauses using JSON. Example: {\"ISO 45001\": {\"7\": [\"7.2 Competence\"]}}")); clause_edit=QTextEdit(); clause_edit.setPlainText(json.dumps(json.loads(db.setting("audit_clause_map","")) if db.setting("audit_clause_map","") else ISO_CLAUSES,ensure_ascii=False,indent=2)); cl.addWidget(clause_edit); tabs.addTab(clause_tab,"Clauses / Sub-Clauses")
+        info=QLabel("Clause and Sub-Clause selections in each finding are dependent on the selected Audit Standard. Changes here affect only the Audit module."); info.setWordWrap(True); lay.addWidget(info)
+        buttons=QDialogButtonBox(QDialogButtonBox.StandardButton.Save|QDialogButtonBox.StandardButton.Cancel); lay.addWidget(buttons)
+        def save():
+            for key,lw in [("audit_types",types),("audit_finding_types",ftypes),("audit_finding_statuses",statuses),("audit_standards",standards)]: db.set_setting(key,json.dumps([lw.item(i).text() for i in range(lw.count())],ensure_ascii=False))
+            try:
+                clause_data=json.loads(clause_edit.toPlainText())
+                if not isinstance(clause_data,dict): raise ValueError("Clause configuration must be a JSON object.")
+                db.set_setting("audit_clause_map",json.dumps(clause_data,ensure_ascii=False))
+            except Exception as e:
+                QMessageBox.warning(d,"Invalid Clause Configuration",str(e)); return
+            d.accept()
+        buttons.accepted.connect(save); buttons.rejected.connect(d.reject); d.exec()
+
+    def _audit_report_data(self,audit_id):
+        a=db.fetchone("SELECT * FROM audits WHERE id=?",(audit_id,)); fs=db.fetchall("SELECT * FROM audit_findings WHERE audit_id=? ORDER BY finding_number,id",(audit_id,)); return a,fs
+
+    def _audit_export_word(self,audit_id):
+        a,fs=self._audit_report_data(audit_id)
+        if not a:return
+        path=self._export_path(f"{a['number']}_Audit_Report.docx","Save Audit Word Report","Word Documents (*.docx)");
+        if not path:return
+        try:
+            doc=Document(); sec=doc.sections[0]; sec.orientation=WD_ORIENT.LANDSCAPE; sec.page_width,sec.page_height=sec.page_height,sec.page_width
+            logo=report_logo_path()
+            if logo and Path(logo).exists():
+                p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run().add_picture(str(logo),width=Inches(1.3))
+            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("AUDIT REPORT"); r.bold=True; r.font.size=Pt(20)
+            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run(safe(company_name())).bold=True
+            info=doc.add_table(rows=0,cols=2); info.alignment=WD_TABLE_ALIGNMENT.CENTER
+            for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"] )]:
+                cells=info.add_row().cells; cells[0].text=k; cells[1].text=safe(v)
+            doc.add_heading("Findings Summary",level=1); t=doc.add_table(rows=1,cols=7); t.alignment=WD_TABLE_ALIGNMENT.CENTER
+            for i,h in enumerate(["Finding","Type","Clause","Sub-Clause","Responsible","Status","Target Date"]): t.rows[0].cells[i].text=h
+            for f in fs:
+                cells=t.add_row().cells
+                for i,v in enumerate([f["finding_number"],f["finding_type"],f["clause"],f["sub_clause"],f["responsible"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]]): cells[i].text=safe(v)
+            doc.add_heading("Detailed Findings",level=1)
+            for f in fs:
+                doc.add_heading(f"Finding {f['finding_number']} — {safe(f['finding_type'])}",level=2)
+                tt=doc.add_table(rows=0,cols=2)
+                for k,v in [("Clause",f["clause"]),("Sub-Clause",f["sub_clause"]),("Finding Detail",f["finding_detail"] or f["observation"]),("Corrective Action",f["corrective_action"]),("Responsible Person",f["responsible"]),("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]),("Target Date",f["target_date"])]:
+                    c=tt.add_row().cells; c[0].text=k; c[1].text=safe(v)
+                ars=self._audit_attachment_rows(audit_id,f["id"])
+                if ars:
+                    doc.add_paragraph("Attachments:")
+                    for ar in ars:
+                        fp=Path(safe(ar["file_path"])); p=doc.add_paragraph(fp.name)
+                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: doc.add_picture(str(fp),width=Inches(2.0))
+            doc.add_heading("Review & Approval",level=1)
+            for k,v in [("Auditor",f"{safe(a['auditor'])} | {safe(a['auditor_position'])} | {safe(a['auditor_date'])}"),("Reviewer",f"{safe(a['reviewer'])} | {safe(a['reviewer_position'])} | {safe(a['reviewer_date'])}"),("Approver",f"{safe(a['approver'])} | {safe(a['approver_position'])} | {safe(a['approver_date'])}")]: doc.add_paragraph(f"{k}: {v}")
+            doc.add_paragraph(safe(db.setting("report_footer","")))
+            doc.save(path); self.show_export_success(path)
+        except Exception as e: logging.exception("Audit Word export failed"); QMessageBox.critical(self,"Export Error",str(e))
+
+    def _audit_export_excel(self,audit_id):
+        a,fs=self._audit_report_data(audit_id)
+        if not a:return
+        path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)");
+        if not path:return
+        try:
+            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A2"
+            ws.append([company_name()]); ws.append(["AUDIT REPORT"]); ws.append([])
+            for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),("Total Findings",len(fs))]: ws.append([k,safe(v)])
+            ws.column_dimensions["A"].width=25; ws.column_dimensions["B"].width=70
+            thin=Side(style="thin",color="808080")
+            for row in ws.iter_rows():
+                for c in row: c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
+            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Status","Target Date"])
+            for f in fs:fws.append([f["finding_number"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]])
+            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Attachment Name","File Type","Uploaded By","Upload Date"])
+            for ar in self._audit_attachment_rows(audit_id): aws.append(["Audit Level",Path(safe(ar["file_path"])).name,Path(safe(ar["file_path"])).suffix.lower(),safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+            for f in fs:
+                for ar in self._audit_attachment_rows(audit_id,f["id"]): aws.append([f["finding_number"],Path(safe(ar["file_path"])).name,Path(safe(ar["file_path"])).suffix.lower(),safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+            cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.append(["Finding Number","Corrective Action","Responsible Person","Target Date","Status","Days Remaining"])
+            for f in fs:
+                try: days=(date.fromisoformat(safe(f["target_date"]))-date.today()).days if f["target_date"] else ""
+                except Exception: days=""
+                cws.append([f["finding_number"],f["corrective_action"],f["responsible"],f["target_date"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],days])
+            for sh in wb.worksheets:
+                sh.freeze_panes=sh.freeze_panes or "A2"; sh.auto_filter.ref=sh.dimensions
+                for cell in sh[1]: cell.font=cell.font.copy(bold=True); cell.fill=PatternFill("solid",fgColor="17365D"); cell.font=cell.font.copy(color="FFFFFF",bold=True)
+                for col in sh.columns:
+                    letter=col[0].column_letter; sh.column_dimensions[letter].width=min(max(max(len(safe(c.value)) for c in col)+2,12),55)
+                    for c in col:c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
+            wb.save(path); self.show_export_success(path)
+        except Exception as e: logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
+
+    def _audit_export_pdf(self,audit_id):
+        a,fs=self._audit_report_data(audit_id)
+        if not a:return
+        path=self._export_path(f"{a['number']}_Audit_Report.pdf","Save Audit Professional Report","PDF Files (*.pdf)");
+        if not path:return
+        try:
+            styles=getSampleStyleSheet(); doc=SimpleDocTemplate(path,pagesize=A4,rightMargin=28,leftMargin=28,topMargin=30,bottomMargin=28); story=[]
+            logo=report_logo_path()
+            if logo and Path(logo).exists(): story.append(RLImage(str(logo),width=90,height=55,preserveAspectRatio=True))
+            story += [Paragraph(f"<b>AUDIT REPORT</b>",styles["Title"]),Paragraph(f"<b>{xml_safe(company_name())}</b>",styles["Heading2"]),Spacer(1,8)]
+            meta=[["Audit Reference",a["number"]],["Audit Type",a["audit_type"]],["Audit Title",a["title"]],["Audit Date",a["audit_date"]],["Department",a["department"]],["Location",a["location"]],["Standard",a["standard"]],["Scope",a["scope"]],["Audit Criteria",a["criteria"]]]
+            mt=Table(meta,colWidths=[120,400]); mt.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.grey),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#EAF0F6")),("VALIGN",(0,0),(-1,-1),"TOP") ])); story += [mt,Spacer(1,12),Paragraph("<b>FINDINGS</b>",styles["Heading2"])]
+            data=[["No.","Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible","Status","Target"]]
+            for f in fs:data.append([str(f["finding_number"]),safe(f["finding_type"]),safe(f["clause"]),safe(f["sub_clause"]),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["responsible"]),"OVERDUE" if overdue(f["target_date"],f["status"]) else safe(f["status"]),safe(f["target_date"])])
+            ps=styles["Normal"]; ps.fontSize=6.2; ps.leading=7.2
+            pdata=[[Paragraph(xml_safe(v),ps) for v in row] for row in data]
+            ft=Table(pdata,repeatRows=1,colWidths=[25,55,55,60,115,100,65,55,55]); ft.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#17365D")),("TEXTCOLOR",(0,0),(-1,0),colors.white),("GRID",(0,0),(-1,-1),0.4,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP") ])); story.append(ft)
+            story += [Spacer(1,12),Paragraph("<b>REVIEW & APPROVAL</b>",styles["Heading2"]),Paragraph(xml_safe(f"Auditor: {a['auditor']} | {a['auditor_position']} | {a['auditor_date']}"),ps),Paragraph(xml_safe(f"Reviewer: {a['reviewer']} | {a['reviewer_position']} | {a['reviewer_date']}"),ps),Paragraph(xml_safe(f"Approver: {a['approver']} | {a['approver_position']} | {a['approver_date']}"),ps)]
+            doc.build(story); self.show_export_success(path)
+        except Exception as e: logging.exception("Audit PDF export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
     def capa(self):
         w,layout=self.page("CAPA Register")
