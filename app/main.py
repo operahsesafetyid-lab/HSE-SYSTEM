@@ -40,7 +40,7 @@ from docx.oxml.ns import qn
 
 
 APP_NAME = "HSE Management System"
-APP_VERSION = "1.4.15"
+APP_VERSION = "1.4.17"
 
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / APP_NAME
 DB_DIR = APP_DIR / "database"
@@ -3061,7 +3061,8 @@ class MainWindow(QMainWindow):
         top.addWidget(title); top.addStretch()
         new_btn=QPushButton("+ NEW AUDIT"); new_btn.setMinimumHeight(40); new_btn.setStyleSheet("font-weight:bold;padding:8px 18px;")
         settings_btn=QPushButton("Audit Settings")
-        top.addWidget(settings_btn); top.addWidget(new_btn); layout.addLayout(top)
+        report_btn=QPushButton("Generate Report")
+        top.addWidget(settings_btn); top.addWidget(report_btn); top.addWidget(new_btn); layout.addLayout(top)
 
         filters=QHBoxLayout()
         search=QLineEdit(); search.setPlaceholderText("Search reference, title, department, location or auditor..."); filters.addWidget(search,2)
@@ -3101,7 +3102,11 @@ class MainWindow(QMainWindow):
         def open_selected():
             aid=selected_id()
             if aid: self.audit_workspace(aid, load)
-        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings)
+        def generate_selected():
+            aid=selected_id()
+            if aid: self._audit_register_detail(aid)
+            else: QMessageBox.information(self,"Select Audit","Select an audit from the register first.")
+        new_btn.clicked.connect(lambda:self.audit_type_selector(load)); settings_btn.clicked.connect(self.audit_settings); report_btn.clicked.connect(generate_selected)
         table.cellDoubleClicked.connect(lambda *_:open_selected())
         table.cellClicked.connect(lambda row,col: self._audit_register_detail(table.item(row,0).data(Qt.ItemDataRole.UserRole)) if col==0 and table.item(row,0) else None)
         for ctl in [search,status,typ,dept]:
@@ -3152,18 +3157,14 @@ class MainWindow(QMainWindow):
         overview=QWidget(); of=QFormLayout(overview); of.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         audit_type=QComboBox(); audit_type.addItems(self._audit_types());
         title=QLineEdit(); audit_date=QDateEdit(); audit_date.setCalendarPopup(True); audit_date.setDisplayFormat("dd-MMM-yyyy"); audit_date.setDate(datetime.now().date())
-        reference=QLineEdit(); reference.setReadOnly(True); department=QComboBox(); department.setEditable(True); location=QComboBox(); location.setEditable(True); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit();
-        departments=sorted({safe(r["department"]) for r in db.fetchall("SELECT department FROM employees WHERE active=1") if safe(r["department"])})
-        department.addItems(departments)
-        locations=sorted({safe(r["location"]) for r in db.fetchall("SELECT location FROM projects WHERE active=1") if "location" in r.keys() and safe(r["location"])})
-        location.addItems(locations)
+        reference=QLineEdit(); reference.setReadOnly(True); department=QLineEdit(); department.setPlaceholderText("Enter department..."); location=QLineEdit(); location.setPlaceholderText("Enter audit location..."); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit()
         of.addRow("Audit Type:",audit_type); of.addRow("Audit Reference:",reference); of.addRow("Audit Title:",title); of.addRow("Audit Date:",audit_date); of.addRow("Department:",department); of.addRow("Location:",location); of.addRow("Audit Standard:",standard); of.addRow("Audit Scope:",scope); of.addRow("Audit Criteria:",criteria)
         tabs.addTab(overview,"Overview")
 
         findings_tab=QWidget(); fl=QVBoxLayout(findings_tab); finding_scroll=QScrollArea(); finding_scroll.setWidgetResizable(True); finding_host=QWidget(); finding_layout=QVBoxLayout(finding_host); finding_layout.setAlignment(Qt.AlignmentFlag.AlignTop); finding_scroll.setWidget(finding_host); fl.addWidget(finding_scroll,1); add_finding=QPushButton("+ ADD FINDING"); add_finding.setMinimumHeight(40); fl.addWidget(add_finding); tabs.addTab(findings_tab,"Findings")
         review=QWidget(); rf=QFormLayout(review); rf.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         def person_row(label):
-            row=QHBoxLayout(); c=self._audit_person_combo(); pos=QLineEdit(); dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); row.addWidget(c,2); row.addWidget(pos,1); row.addWidget(dt); box=QWidget(); box.setLayout(row); rf.addRow(label,box); return c,pos,dt
+            row=QHBoxLayout(); c=QLineEdit(); c.setPlaceholderText("Enter name..."); pos=QLineEdit(); pos.setPlaceholderText("Position..."); dt=QDateEdit(); dt.setCalendarPopup(True); dt.setDisplayFormat("dd-MMM-yyyy"); row.addWidget(c,2); row.addWidget(pos,1); row.addWidget(dt); box=QWidget(); box.setLayout(row); rf.addRow(label,box); return c,pos,dt
         auditor, auditor_pos, auditor_date=person_row("Auditor (Name / Position / Date):")
         reviewer, reviewer_pos, reviewer_date=person_row("Reviewed By:")
         approver, approver_pos, approver_date=person_row("Approved By:")
@@ -3180,7 +3181,7 @@ class MainWindow(QMainWindow):
             fs=QComboBox(); fs.addItems(self._audit_standards())
             cl=QComboBox(); sc=QComboBox()
             detail=QTextEdit(); detail.setMinimumHeight(100); ca=QTextEdit(); ca.setMinimumHeight(90)
-            rp=self._audit_person_combo(); rp.setEditable(True); rp.setInsertPolicy(QComboBox.InsertPolicy.NoInsert); rp.setCurrentIndex(0)
+            rp=QLineEdit(); rp.setPlaceholderText("Enter responsible person...")
             loc=QLineEdit(); loc.setPlaceholderText("Enter finding location...")
             status=QComboBox(); status.addItems(self._audit_finding_statuses())
             td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
@@ -3198,11 +3199,7 @@ class MainWindow(QMainWindow):
                 if data["target_date"]:
                     try: td.setDate(date.fromisoformat(data["target_date"]))
                     except Exception: pass
-                pid=data["responsible_person_id"] if "responsible_person_id" in data.keys() else None
-                if pid is not None:
-                    ix=rp.findData(pid); rp.setCurrentIndex(ix if ix>=0 else 0)
-                if not pid and safe(data.get("responsible", "")):
-                    rp.setEditText(safe(data["responsible"]))
+                rp.setText(safe(data.get("responsible", "")))
                 if existing:
                     for ar in self._audit_attachment_rows(existing["id"], data["id"]):
                         fp=safe(ar["file_path"])
@@ -3228,11 +3225,10 @@ class MainWindow(QMainWindow):
         def load_audit():
             nonlocal existing
             if not existing:return
-            audit_type.setCurrentText(safe(existing["audit_type"])); reference.setText(safe(existing["number"])); title.setText(safe(existing["title"])); department.setCurrentText(safe(existing["department"])); location.setCurrentText(safe(existing["location"])); standard.setCurrentText(safe(existing["standard"])); scope.setPlainText(safe(existing["scope"])); criteria.setPlainText(safe(existing["criteria"]))
+            audit_type.setCurrentText(safe(existing["audit_type"])); reference.setText(safe(existing["number"])); title.setText(safe(existing["title"])); department.setText(safe(existing["department"])); location.setText(safe(existing["location"])); standard.setCurrentText(safe(existing["standard"])); scope.setPlainText(safe(existing["scope"])); criteria.setPlainText(safe(existing["criteria"]))
             try:audit_date.setDate(date.fromisoformat(safe(existing["audit_date"])))
             except Exception:pass
-            for combo, name in [(auditor,"auditor"),(reviewer,"reviewer"),(approver,"approver")]:
-                val=safe(existing[name]); ix=combo.findText(val); combo.setCurrentIndex(ix if ix>=0 else 0)
+            auditor.setText(safe(existing["auditor"])); reviewer.setText(safe(existing["reviewer"])); approver.setText(safe(existing["approver"]))
             auditor_pos.setText(safe(existing["auditor_position"])); reviewer_pos.setText(safe(existing["reviewer_position"])); approver_pos.setText(safe(existing["approver_position"]))
             for widget,key in [(auditor_date,"auditor_date"),(reviewer_date,"reviewer_date"),(approver_date,"approver_date")]:
                 try: widget.setDate(date.fromisoformat(safe(existing[key])))
@@ -3274,11 +3270,11 @@ class MainWindow(QMainWindow):
             if not standard.currentText(): return "Audit Standard is required."
             if not finding_widgets: return "At least one finding is required."
             for i,x in enumerate(finding_widgets,1):
-                required=[(x["type"].currentText(),"Finding Type"),(x["standard"].currentText(),"Standard"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].currentText().strip(),"Responsible Person"),(x["location"].text().strip(),"Location")]
+                required=[(x["type"].currentText(),"Finding Type"),(x["standard"].currentText(),"Standard"),(x["clause"].currentText(),"Clause"),(x["sub"].currentText(),"Sub-Clause"),(x["detail"].toPlainText().strip(),"Finding Detail"),(x["ca"].toPlainText().strip(),"Corrective Action"),(x["person"].text().strip(),"Responsible Person"),(x["location"].text().strip(),"Location")]
                 for val,label in required:
                     if not val or val.startswith("--") or val.startswith("No active"): return f"Finding {i}: {label} is required."
                 if not x["target"].date(): return f"Finding {i}: Target Date is required."
-            if auditor.currentIndex()<=0 or reviewer.currentIndex()<=0 or approver.currentIndex()<=0: return "Auditor, Reviewer and Approver are required."
+            if not auditor.text().strip() or not reviewer.text().strip() or not approver.text().strip(): return "Auditor, Reviewer and Approver are required."
             return ""
         def save_audit(final=False):
             nonlocal existing
@@ -3288,7 +3284,7 @@ class MainWindow(QMainWindow):
                 if QMessageBox.question(d,"Confirm Submission","Once this audit is submitted, it will become read-only and cannot be edited.")!=QMessageBox.StandardButton.Yes: return
             try:
                 now=datetime.now().isoformat(timespec="seconds")
-                vals=(audit_date.date().toString("yyyy-MM-dd"),audit_type.currentText(),title.text().strip(),standard.currentText(),department.currentText().strip(),location.currentText().strip(),scope.toPlainText(),criteria.toPlainText(),auditor.currentText() if auditor.currentIndex()>0 else "",auditor_pos.text(),auditor_date.date().toString("yyyy-MM-dd"),reviewer.currentText() if reviewer.currentIndex()>0 else "",reviewer_pos.text(),reviewer_date.date().toString("yyyy-MM-dd"),approver.currentText() if approver.currentIndex()>0 else "",approver_pos.text(),approver_date.date().toString("yyyy-MM-dd"),"Submitted" if final else "Draft",now,now if final else "")
+                vals=(audit_date.date().toString("yyyy-MM-dd"),audit_type.currentText(),title.text().strip(),standard.currentText(),department.text().strip(),location.text().strip(),scope.toPlainText(),criteria.toPlainText(),auditor.text().strip(),auditor_pos.text(),auditor_date.date().toString("yyyy-MM-dd"),reviewer.text().strip(),reviewer_pos.text(),reviewer_date.date().toString("yyyy-MM-dd"),approver.text().strip(),approver_pos.text(),approver_date.date().toString("yyyy-MM-dd"),"Submitted" if final else "Draft",now,now if final else "")
                 if not existing:
                     db.execute("INSERT INTO audits(number,audit_date,audit_type,title,standard,department,location,scope,criteria,auditor,auditor_position,auditor_date,reviewer,reviewer_position,reviewer_date,approver,approver_position,approver_date,status,created_by,created_at,updated_at,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                (reference.text(),)+vals[:18]+(db.setting("current_user","") or "System User",now,now,vals[-1]))
@@ -3312,9 +3308,9 @@ class MainWindow(QMainWindow):
                 if existing and db.fetchone("SELECT COUNT(*) c FROM audit_findings WHERE audit_id=?",(existing["id"],))["c"]>0:
                     db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
                 for n,x in enumerate(finding_widgets,1):
-                    pid=x["person"].currentData()
+                    pid=None
                     db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].currentText().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
+                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
                     fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
                     paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
                     for fp in paths:
@@ -3406,14 +3402,19 @@ class MainWindow(QMainWindow):
         try:
             doc=Document(); sec=doc.sections[0]; sec.orientation=WD_ORIENT.LANDSCAPE; sec.page_width,sec.page_height=sec.page_height,sec.page_width
             logo=report_logo_path()
+            header=doc.add_table(rows=1, cols=3); header.alignment=WD_TABLE_ALIGNMENT.CENTER; header.autofit=False
+            hc=header.rows[0].cells
             if logo and Path(logo).exists():
-                p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run().add_picture(str(logo),width=Inches(1.3))
+                hp=hc[0].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; hp.add_run().add_picture(str(logo),width=Inches(1.1))
+            hp=hc[1].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; rr=hp.add_run("AUDIT REPORT\n"); rr.bold=True; rr.font.size=Pt(16); rr=hp.add_run(safe(company_name())); rr.bold=True; rr.font.size=Pt(11)
+            hp=hc[2].paragraphs[0]; hp.add_run(f"Audit No.: {safe(a['number'])}\n").bold=True; hp.add_run(f"Date: {safe(a['audit_date'])}\n"); hp.add_run(f"Document No.: {document_prefix()}-AUDIT")
+            doc.add_paragraph()
             p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("AUDIT REPORT"); r.bold=True; r.font.size=Pt(20)
             p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run(safe(company_name())).bold=True
             info=doc.add_table(rows=0,cols=2); info.alignment=WD_TABLE_ALIGNMENT.CENTER
             for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"] )]:
                 cells=info.add_row().cells; cells[0].text=k; cells[1].text=safe(v)
-            doc.add_heading("Findings Summary",level=1); t=doc.add_table(rows=1,cols=7); t.alignment=WD_TABLE_ALIGNMENT.CENTER
+            doc.add_heading("Findings Summary",level=1); t=doc.add_table(rows=1,cols=9); t.alignment=WD_TABLE_ALIGNMENT.CENTER
             for i,h in enumerate(["Finding","Standard","Type","Clause","Sub-Clause","Responsible","Location","Status","Target Date"]): t.rows[0].cells[i].text=h
             for f in fs:
                 cells=t.add_row().cells
@@ -3426,10 +3427,13 @@ class MainWindow(QMainWindow):
                     c=tt.add_row().cells; c[0].text=k; c[1].text=safe(v)
                 ars=self._audit_attachment_rows(audit_id,f["id"])
                 if ars:
-                    doc.add_paragraph("Attachments:")
+                    image_count=0
                     for ar in ars:
-                        fp=Path(safe(ar["file_path"])); p=doc.add_paragraph(fp.name)
-                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: doc.add_picture(str(fp),width=Inches(2.0))
+                        fp=Path(safe(ar["file_path"]))
+                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                            p=doc.add_paragraph(); r=p.add_run("Evidence Photo"); r.bold=True; doc.add_picture(str(fp),width=Inches(2.0)); image_count += 1
+                    if image_count == 0:
+                        doc.add_paragraph("Evidence: No photo attachment available.")
             doc.add_heading("Review & Approval",level=1)
             for k,v in [("Auditor",f"{safe(a['auditor'])} | {safe(a['auditor_position'])} | {safe(a['auditor_date'])}"),("Reviewer",f"{safe(a['reviewer'])} | {safe(a['reviewer_position'])} | {safe(a['reviewer_date'])}"),("Approver",f"{safe(a['approver'])} | {safe(a['approver_position'])} | {safe(a['approver_date'])}")]: doc.add_paragraph(f"{k}: {v}")
             doc.add_paragraph(safe(db.setting("report_footer","")))
@@ -3442,19 +3446,44 @@ class MainWindow(QMainWindow):
         path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)");
         if not path:return
         try:
-            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A2"
-            ws.append([company_name()]); ws.append(["AUDIT REPORT"]); ws.append([])
+            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A5"
+            ws.merge_cells("A1:C3"); ws.merge_cells("D1:H3"); ws.merge_cells("I1:K1"); ws.merge_cells("I2:K2"); ws.merge_cells("I3:K3")
+            ws["D1"] = f"AUDIT REPORT\n{company_name()}"; ws["I1"] = f"Audit No.: {a['number']}"; ws["I2"] = f"Document No.: {document_prefix()}-AUDIT"; ws["I3"] = f"Date: {a['audit_date']}"
+            logo_path=report_logo_path()
+            if logo_path and Path(logo_path).exists():
+                try:
+                    logo=XLImage(logo_path); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
+                except Exception: logging.exception("Unable to embed audit Excel logo")
+            for ref in ["A1","D1","I1","I2","I3"]:
+                ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=copy(ws[ref].font); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
+            ws.append([]); ws.append(["AUDIT SUMMARY"])
             for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),("Total Findings",len(fs))]: ws.append([k,safe(v)])
             ws.column_dimensions["A"].width=25; ws.column_dimensions["B"].width=70
             thin=Side(style="thin",color="808080")
             for row in ws.iter_rows():
                 for c in row: c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
-            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date"])
-            for f in fs:fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]])
-            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Attachment Name","File Type","Uploaded By","Upload Date"])
-            for ar in self._audit_attachment_rows(audit_id): aws.append(["Audit Level",Path(safe(ar["file_path"])).name,Path(safe(ar["file_path"])).suffix.lower(),safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date","Evidence Photo"])
             for f in fs:
-                for ar in self._audit_attachment_rows(audit_id,f["id"]): aws.append([f["finding_number"],Path(safe(ar["file_path"])).name,Path(safe(ar["file_path"])).suffix.lower(),safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+                fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"],""])
+                rr=fws.max_row; fws.row_dimensions[rr].height=85
+                photos=[]
+                for ar in self._audit_attachment_rows(audit_id,f["id"]):
+                    fp=Path(safe(ar["file_path"]))
+                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
+                if photos:
+                    try:
+                        img=XLImage(str(photos[0])); img.width=min(img.width,110); img.height=min(img.height,70); img.anchor=f"L{rr}"; fws.add_image(img); fws.cell(rr,12).value="Photo evidence"
+                    except Exception: logging.exception("Unable to embed audit finding photo")
+            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Evidence Photo","File Type","Uploaded By","Upload Date"])
+            attachment_rows=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
+            for f in fs: attachment_rows += [(f["finding_number"],ar) for ar in self._audit_attachment_rows(audit_id,f["id"])]
+            for label,ar in attachment_rows:
+                fp=Path(safe(ar["file_path"])); aws.append([label,"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
+                rr=aws.max_row; aws.row_dimensions[rr].height=90
+                if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                    try:
+                        img=XLImage(str(fp)); img.width=min(img.width,130); img.height=min(img.height,75); img.anchor=f"B{rr}"; aws.add_image(img)
+                    except Exception: logging.exception("Unable to embed audit attachment photo")
             cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.append(["Finding Number","Corrective Action","Responsible Person","Target Date","Status","Days Remaining"])
             for f in fs:
                 try: days=(date.fromisoformat(safe(f["target_date"]))-date.today()).days if f["target_date"] else ""
