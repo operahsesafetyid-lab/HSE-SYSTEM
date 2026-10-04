@@ -30,6 +30,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from openpyxl import Workbook
 from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Alignment, PatternFill, Border, Side
+from openpyxl.cell.cell import MergedCell
 from docx import Document
 from docx.shared import Inches, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -3397,53 +3398,122 @@ class MainWindow(QMainWindow):
     def _audit_export_word(self,audit_id):
         a,fs=self._audit_report_data(audit_id)
         if not a:return
-        path=self._export_path(f"{a['number']}_Audit_Report.docx","Save Audit Word Report","Word Documents (*.docx)");
+        path=self._export_path(f"{a['number']}_Audit_Report.docx","Save Audit Word Report","Word Documents (*.docx)")
         if not path:return
         try:
-            doc=Document(); sec=doc.sections[0]; sec.orientation=WD_ORIENT.LANDSCAPE; sec.page_width,sec.page_height=sec.page_height,sec.page_width
-            logo=report_logo_path()
-            header=doc.add_table(rows=1, cols=3); header.alignment=WD_TABLE_ALIGNMENT.CENTER; header.autofit=False
+            doc=Document()
+            sec=doc.sections[0]
+            sec.orientation=WD_ORIENT.LANDSCAPE
+            sec.page_width,sec.page_height=sec.page_height,sec.page_width
+            sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35); sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35)
+
+            # Professional header, matching the existing investigation/observation report approach.
+            header=doc.add_table(rows=1, cols=3)
+            header.alignment=WD_TABLE_ALIGNMENT.CENTER
+            header.autofit=False
             hc=header.rows[0].cells
+            widths=[Inches(1.35),Inches(7.10),Inches(2.45)]
+            for c,w in zip(hc,widths):
+                c.width=w
+                c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            logo=report_logo_path()
             if logo and Path(logo).exists():
-                hp=hc[0].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; hp.add_run().add_picture(str(logo),width=Inches(1.1))
-            hp=hc[1].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER; rr=hp.add_run("AUDIT REPORT\n"); rr.bold=True; rr.font.size=Pt(16); rr=hp.add_run(safe(company_name())); rr.bold=True; rr.font.size=Pt(11)
-            hp=hc[2].paragraphs[0]; hp.add_run(f"Audit No.: {safe(a['number'])}\n").bold=True; hp.add_run(f"Date: {safe(a['audit_date'])}\n"); hp.add_run(f"Document No.: {document_prefix()}-AUDIT")
+                hp=hc[0].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                hp.add_run().add_picture(str(logo),width=Inches(1.05))
+            hp=hc[1].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            r=hp.add_run("AUDIT REPORT\n"); r.bold=True; r.font.size=Pt(16)
+            r=hp.add_run(safe(company_name())); r.bold=True; r.font.size=Pt(11)
+            hp=hc[2].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.LEFT
+            r=hp.add_run(f"Audit No.: {safe(a['number'])}\n"); r.bold=True
+            hp.add_run(f"Date: {safe(a['audit_date'])}\n")
+            hp.add_run(f"Document No.: {document_prefix()}-AUDIT")
+            style_docx_table(header,header=False,font_size=8)
+
+            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            r=p.add_run("AUDIT DETAILS"); r.bold=True; r.font.size=Pt(13)
+            info=doc.add_table(rows=0,cols=4); info.alignment=WD_TABLE_ALIGNMENT.CENTER; info.autofit=False
+            detail_rows=[
+                ("Audit Reference",a["number"],"Audit Type",a["audit_type"]),
+                ("Audit Title",a["title"],"Audit Date",a["audit_date"]),
+                ("Department",a["department"],"Location",a["location"]),
+                ("Standard",a["standard"],"Status",a["status"]),
+                ("Scope",a["scope"],"Audit Criteria",a["criteria"]),
+            ]
+            for vals in detail_rows:
+                cells=info.add_row().cells
+                for i,v in enumerate(vals): cells[i].text=safe(v)
+            for row in info.rows:
+                for i,c in enumerate(row.cells):
+                    c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                    c.width=Inches(1.45 if i%2==0 else 4.10)
+            style_docx_table(info,header=False,font_size=8)
+
+            # Findings are presented as real tables. Each finding gets a minimum 2-inch row
+            # for the evidence/detail area; rows are AT_LEAST so long text can expand naturally.
             doc.add_paragraph()
-            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; r=p.add_run("AUDIT REPORT"); r.bold=True; r.font.size=Pt(20)
-            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER; p.add_run(safe(company_name())).bold=True
-            info=doc.add_table(rows=0,cols=2); info.alignment=WD_TABLE_ALIGNMENT.CENTER
-            for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"] )]:
-                cells=info.add_row().cells; cells[0].text=k; cells[1].text=safe(v)
-            doc.add_heading("Findings Summary",level=1); t=doc.add_table(rows=1,cols=9); t.alignment=WD_TABLE_ALIGNMENT.CENTER
-            for i,h in enumerate(["Finding","Standard","Type","Clause","Sub-Clause","Responsible","Location","Status","Target Date"]): t.rows[0].cells[i].text=h
+            p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            r=p.add_run("AUDIT FINDINGS"); r.bold=True; r.font.size=Pt(13)
             for f in fs:
-                cells=t.add_row().cells
-                for i,v in enumerate([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"]]): cells[i].text=safe(v)
-            doc.add_heading("Detailed Findings",level=1)
-            for f in fs:
-                doc.add_heading(f"Finding {f['finding_number']} — {safe(f['finding_type'])}",level=2)
-                tt=doc.add_table(rows=0,cols=2)
-                for k,v in [("Standard",f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),("Clause",f["clause"]),("Sub-Clause",f["sub_clause"]),("Finding Detail",f["finding_detail"] or f["observation"]),("Corrective Action",f["corrective_action"]),("Responsible Person",f["responsible"]),("Location",f["location"] if "location" in f.keys() else ""),("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"]),("Target Date",f["target_date"])]:
-                    c=tt.add_row().cells; c[0].text=k; c[1].text=safe(v)
+                p=doc.add_paragraph(); r=p.add_run(f"Finding {safe(f['finding_number'])} — {safe(f['finding_type'])}"); r.bold=True; r.font.size=Pt(10)
+                ft=doc.add_table(rows=0,cols=4); ft.alignment=WD_TABLE_ALIGNMENT.CENTER; ft.autofit=False
+                rows=[
+                    ("Standard",f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],"Clause",f["clause"]),
+                    ("Sub-Clause",f["sub_clause"],"Finding Type",f["finding_type"]),
+                    ("Responsible Person",f["responsible"],"Location",f["location"] if "location" in f.keys() else ""),
+                    ("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],"Target Date",f["target_date"]),
+                    ("Finding Detail",f["finding_detail"] or f["observation"],"Corrective Action",f["corrective_action"]),
+                ]
+                for vals in rows:
+                    cells=ft.add_row().cells
+                    for i,v in enumerate(vals): cells[i].text=safe(v)
+                    for c in cells:
+                        c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
+                    # The main finding-content row starts at 2 inches and expands with text.
+                    if vals[0]=="Finding Detail":
+                        trPr=cells[0]._tc.getparent().get_or_add_trPr()
+                        trHeight=OxmlElement("w:trHeight"); trHeight.set(qn("w:val"),str(2880)); trHeight.set(qn("w:hRule"),"atLeast"); trPr.append(trHeight)
+                for row in ft.rows:
+                    row.cells[0].width=Inches(1.35); row.cells[1].width=Inches(4.25); row.cells[2].width=Inches(1.35); row.cells[3].width=Inches(4.25)
+                style_docx_table(ft,header=False,font_size=8)
                 ars=self._audit_attachment_rows(audit_id,f["id"])
-                if ars:
-                    image_count=0
-                    for ar in ars:
-                        fp=Path(safe(ar["file_path"]))
-                        if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
-                            p=doc.add_paragraph(); r=p.add_run("Evidence Photo"); r.bold=True; doc.add_picture(str(fp),width=Inches(2.0)); image_count += 1
-                    if image_count == 0:
-                        doc.add_paragraph("Evidence: No photo attachment available.")
-            doc.add_heading("Review & Approval",level=1)
-            for k,v in [("Auditor",f"{safe(a['auditor'])} | {safe(a['auditor_position'])} | {safe(a['auditor_date'])}"),("Reviewer",f"{safe(a['reviewer'])} | {safe(a['reviewer_position'])} | {safe(a['reviewer_date'])}"),("Approver",f"{safe(a['approver'])} | {safe(a['approver_position'])} | {safe(a['approver_date'])}")]: doc.add_paragraph(f"{k}: {v}")
+                photos=[]
+                for ar in ars:
+                    fp=Path(safe(ar["file_path"]))
+                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
+                if photos:
+                    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                    r=p.add_run("Evidence Photo(s)"); r.bold=True
+                    for fp in photos:
+                        p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                        p.add_run().add_picture(str(fp),width=Inches(2.0),height=Inches(2.0))
+
+            # Review / approval is a boxed three-row sign-off table, matching the investigation report style.
+            doc.add_paragraph()
+            p=doc.add_paragraph(); r=p.add_run("REVIEW & APPROVAL / SIGN-OFF"); r.bold=True; r.font.size=Pt(12)
+            st=doc.add_table(rows=1,cols=4); st.style="Table Grid"; st.alignment=WD_TABLE_ALIGNMENT.CENTER; st.autofit=False
+            for i,h in enumerate(["Role","Name","Position","Date / Signature"]): st.cell(0,i).text=h
+            sign_rows=[
+                ("Auditor",a["auditor"],a["auditor_position"],a["auditor_date"]),
+                ("Reviewed By",a["reviewer"],a["reviewer_position"],a["reviewer_date"]),
+                ("Approved By",a["approver"],a["approver_position"],a["approver_date"]),
+            ]
+            for role,name,pos,dt in sign_rows:
+                cells=st.add_row().cells
+                cells[0].text=role; cells[1].text=f"Name: {safe(name)}"; cells[2].text=f"Position: {safe(pos)}"; cells[3].text=f"Date: {safe(dt)}\nSignature: ______________________________"
+            for row in st.rows:
+                for i,c in enumerate(row.cells):
+                    c.width=[Inches(1.45),Inches(3.25),Inches(3.0),Inches(3.5)][i]
+                    c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            style_docx_table(st,header=True,font_size=8)
             doc.add_paragraph(safe(db.setting("report_footer","")))
             doc.save(path); self.show_export_success(path)
-        except Exception as e: logging.exception("Audit Word export failed"); QMessageBox.critical(self,"Export Error",str(e))
+        except Exception as e:
+            logging.exception("Audit Word export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
     def _audit_export_excel(self,audit_id):
         a,fs=self._audit_report_data(audit_id)
         if not a:return
-        path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)");
+        path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)")
         if not path:return
         try:
             wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A5"
@@ -3455,48 +3525,77 @@ class MainWindow(QMainWindow):
                     logo=XLImage(logo_path); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
                 except Exception: logging.exception("Unable to embed audit Excel logo")
             for ref in ["A1","D1","I1","I2","I3"]:
-                ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=copy(ws[ref].font); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
+                ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
             ws.append([]); ws.append(["AUDIT SUMMARY"])
             for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),("Total Findings",len(fs))]: ws.append([k,safe(v)])
             ws.column_dimensions["A"].width=25; ws.column_dimensions["B"].width=70
             thin=Side(style="thin",color="808080")
             for row in ws.iter_rows():
-                for c in row: c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
-            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date","Evidence Photo"])
+                for c in row:
+                    if isinstance(c,MergedCell): continue
+                    c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
+
+            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"
+            fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date","Evidence Photo"])
             for f in fs:
                 fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"],""])
-                rr=fws.max_row; fws.row_dimensions[rr].height=85
+                rr=fws.max_row; fws.row_dimensions[rr].height=110
                 photos=[]
                 for ar in self._audit_attachment_rows(audit_id,f["id"]):
                     fp=Path(safe(ar["file_path"]))
                     if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
                 if photos:
                     try:
-                        img=XLImage(str(photos[0])); img.width=min(img.width,110); img.height=min(img.height,70); img.anchor=f"L{rr}"; fws.add_image(img); fws.cell(rr,12).value="Photo evidence"
+                        img=XLImage(str(photos[0])); img.width=110; img.height=90; img.anchor=f"L{rr}"; fws.add_image(img); fws.cell(rr,12).value="Photo evidence"
                     except Exception: logging.exception("Unable to embed audit finding photo")
+            for col,w in {"A":14,"B":16,"C":18,"D":13,"E":18,"F":42,"G":42,"H":24,"I":24,"J":18,"K":15,"L":20}.items(): fws.column_dimensions[col].width=w
+
             aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Evidence Photo","File Type","Uploaded By","Upload Date"])
             attachment_rows=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
             for f in fs: attachment_rows += [(f["finding_number"],ar) for ar in self._audit_attachment_rows(audit_id,f["id"])]
             for label,ar in attachment_rows:
                 fp=Path(safe(ar["file_path"])); aws.append([label,"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
-                rr=aws.max_row; aws.row_dimensions[rr].height=90
+                rr=aws.max_row; aws.row_dimensions[rr].height=110
                 if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                     try:
-                        img=XLImage(str(fp)); img.width=min(img.width,130); img.height=min(img.height,75); img.anchor=f"B{rr}"; aws.add_image(img)
+                        img=XLImage(str(fp)); img.width=130; img.height=90; img.anchor=f"B{rr}"; aws.add_image(img)
                     except Exception: logging.exception("Unable to embed audit attachment photo")
+            for col,w in {"A":18,"B":24,"C":14,"D":24,"E":20}.items(): aws.column_dimensions[col].width=w
+
             cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.append(["Finding Number","Corrective Action","Responsible Person","Target Date","Status","Days Remaining"])
             for f in fs:
                 try: days=(date.fromisoformat(safe(f["target_date"]))-date.today()).days if f["target_date"] else ""
                 except Exception: days=""
                 cws.append([f["finding_number"],f["corrective_action"],f["responsible"],f["target_date"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],days])
+
+            # Format every sheet without touching MergedCell objects. This fixes the
+            # "MergedCell object has no attribute column_letter" export failure.
             for sh in wb.worksheets:
-                sh.freeze_panes=sh.freeze_panes or "A2"; sh.auto_filter.ref=sh.dimensions
-                for cell in sh[1]: cell.font=cell.font.copy(bold=True); cell.fill=PatternFill("solid",fgColor="17365D"); cell.font=cell.font.copy(color="FFFFFF",bold=True)
-                for col in sh.columns:
-                    letter=col[0].column_letter; sh.column_dimensions[letter].width=min(max(max(len(safe(c.value)) for c in col)+2,12),55)
-                    for c in col:c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
+                sh.freeze_panes=sh.freeze_panes or "A2"
+                sh.auto_filter.ref=sh.dimensions
+                for cell in sh[1]:
+                    if isinstance(cell,MergedCell): continue
+                    cell.font=cell.font.copy(bold=True,color="FFFFFF")
+                    cell.fill=PatternFill("solid",fgColor="17365D")
+                    cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                for row in sh.iter_rows():
+                    for c in row:
+                        if isinstance(c,MergedCell): continue
+                        c.alignment=Alignment(vertical="top",wrap_text=True)
+                        c.border=Border(bottom=thin)
+                # Only real cells are used for width calculation; merged placeholders are ignored.
+                for col_cells in sh.iter_cols():
+                    real=[c for c in col_cells if not isinstance(c,MergedCell)]
+                    if not real: continue
+                    letter=real[0].column_letter
+                    max_len=0
+                    for c in real:
+                        val=safe(c.value)
+                        max_len=max(max_len,max((len(x) for x in val.split("\n")),default=0))
+                    sh.column_dimensions[letter].width=min(max(max_len+2,12),55)
             wb.save(path); self.show_export_success(path)
-        except Exception as e: logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
+        except Exception as e:
+            logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
 
     def _audit_export_pdf(self,audit_id):
         a,fs=self._audit_report_data(audit_id)
