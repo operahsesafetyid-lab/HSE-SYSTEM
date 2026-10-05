@@ -348,6 +348,7 @@ class Database:
             "finding_detail": "TEXT DEFAULT ''",
             "responsible_person_id": "INTEGER",
             "location": "TEXT DEFAULT ''",
+            "close_out_evidence": "TEXT DEFAULT ''",
             "created_at": "TEXT DEFAULT ''",
             "updated_at": "TEXT DEFAULT ''"
         }
@@ -3158,7 +3159,7 @@ class MainWindow(QMainWindow):
         overview=QWidget(); of=QFormLayout(overview); of.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         audit_type=QComboBox(); audit_type.addItems(self._audit_types());
         title=QLineEdit(); audit_date=QDateEdit(); audit_date.setCalendarPopup(True); audit_date.setDisplayFormat("dd-MMM-yyyy"); audit_date.setDate(datetime.now().date())
-        reference=QLineEdit(); reference.setReadOnly(True); department=QLineEdit(); department.setPlaceholderText("Enter department..."); location=QLineEdit(); location.setPlaceholderText("Enter audit location..."); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit()
+        reference=QLineEdit(); reference.setPlaceholderText("Enter audit reference..."); department=QLineEdit(); department.setPlaceholderText("Enter department..."); location=QLineEdit(); location.setPlaceholderText("Enter audit location..."); standard=QComboBox(); standard.addItems(self._audit_standards()); scope=QTextEdit(); criteria=QTextEdit()
         of.addRow("Audit Type:",audit_type); of.addRow("Audit Reference:",reference); of.addRow("Audit Title:",title); of.addRow("Audit Date:",audit_date); of.addRow("Department:",department); of.addRow("Location:",location); of.addRow("Audit Standard:",standard); of.addRow("Audit Scope:",scope); of.addRow("Audit Criteria:",criteria)
         tabs.addTab(overview,"Overview")
 
@@ -3186,7 +3187,8 @@ class MainWindow(QMainWindow):
             loc=QLineEdit(); loc.setPlaceholderText("Enter finding location...")
             status=QComboBox(); status.addItems(self._audit_finding_statuses())
             td=QDateEdit(); td.setCalendarPopup(True); td.setDisplayFormat("dd-MMM-yyyy"); td.setDate(datetime.now().date())
-            form.addRow("Finding Type:",ft); form.addRow("Standard:",fs); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Location:",loc); form.addRow("Status:",status); form.addRow("Target Date:",td)
+            closeout=QLineEdit(); closeout.setPlaceholderText("Enter close-out evidence / verification...")
+            form.addRow("Finding Type:",ft); form.addRow("Standard:",fs); form.addRow("Clause:",cl); form.addRow("Sub-Clause:",sc); form.addRow("Finding Detail:",detail); form.addRow("Corrective Action:",ca); form.addRow("Responsible Person:",rp); form.addRow("Location:",loc); form.addRow("Status:",status); form.addRow("Target Date:",td); form.addRow("Close Out Evidence:",closeout)
             evidence=QListWidget(); evidence.setMaximumHeight(110); eb=QHBoxLayout(); add=QPushButton("+ ADD ATTACHMENT"); open_a=QPushButton("View / Open"); rem=QPushButton("Delete Selected"); eb.addWidget(add); eb.addWidget(open_a); eb.addWidget(rem); ew=QWidget(); ee=QVBoxLayout(ew); ee.setContentsMargins(0,0,0,0); ee.addWidget(evidence); ee.addLayout(eb); form.addRow("Attachments:",ew)
             remove=QPushButton("Remove Finding"); form.addRow("",remove)
             def load_cl():
@@ -3196,7 +3198,7 @@ class MainWindow(QMainWindow):
             fs.currentTextChanged.connect(load_cl); cl.currentTextChanged.connect(load_sub); load_cl()
             if data:
                 fs.setCurrentText(safe(data["finding_standard"]) if "finding_standard" in data.keys() and safe(data["finding_standard"]) else safe(existing["standard"]) if existing else self._audit_standards()[0]); load_cl()
-                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"])); loc.setText(safe(data["location"]) if "location" in data.keys() else "")
+                ft.setCurrentText(safe(data["finding_type"])); cl.setCurrentText(safe(data["clause"])); load_sub(); sc.setCurrentText(safe(data["sub_clause"])); detail.setPlainText(safe(data["finding_detail"] or data["observation"])); ca.setPlainText(safe(data["corrective_action"])); status.setCurrentText("Overdue" if overdue(safe(data["target_date"]),safe(data["status"])) else safe(data["status"])); loc.setText(safe(data["location"]) if "location" in data.keys() else ""); closeout.setText(safe(data["close_out_evidence"]) if "close_out_evidence" in data.keys() else "")
                 if data["target_date"]:
                     try: td.setDate(date.fromisoformat(data["target_date"]))
                     except Exception: pass
@@ -3205,7 +3207,8 @@ class MainWindow(QMainWindow):
                     for ar in self._audit_attachment_rows(existing["id"], data["id"]):
                         fp=safe(ar["file_path"])
                         if fp: evidence.addItem(fp)
-            finding_widgets.append({"box":box,"type":ft,"standard":fs,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"location":loc,"status":status,"target":td,"attachments":evidence,"add":add,"remove":remove,"data":data})
+            finding_widgets.append({"box":box,"type":ft,"standard":fs,"clause":cl,"sub":sc,"detail":detail,"ca":ca,"person":rp,"location":loc,"status":status,"target":td,"closeout":closeout,"attachments":evidence,"add":add,"remove":remove,"data":data})
+            closeout.textChanged.connect(lambda text, st=status: st.setCurrentText("Closed") if text.strip() else None)
             def choose():
                 paths,_=QFileDialog.getOpenFileNames(d,"Select Finding Evidence","","Evidence Files (*.png *.jpg *.jpeg *.bmp *.gif *.pdf *.doc *.docx *.xls *.xlsx *.txt *.mp4 *.avi *.mov);;All Files (*)")
                 for p in paths: evidence.addItem(p)
@@ -3255,7 +3258,11 @@ class MainWindow(QMainWindow):
         else: make_finding()
         if existing and readonly:
             overview.setEnabled(False); review.setEnabled(False); add_finding.setEnabled(False); add_att.setEnabled(False); open_att.setEnabled(True); del_att.setEnabled(False)
-            d.setWindowTitle(f"Audit View — {existing['number']} — READ ONLY")
+            for x in finding_widgets:
+                for key in ["type","standard","clause","sub","detail","ca","person","location","target","attachments","add","remove"]:
+                    x[key].setEnabled(False)
+                x["status"].setEnabled(True); x["closeout"].setEnabled(True)
+            d.setWindowTitle(f"Audit View — {existing['number']} — SUBMITTED / STATUS & CLOSE-OUT ONLY")
         else:
             if not existing:
                 reference.setText(next_number("HSE-AUD","audits"))
@@ -3264,7 +3271,7 @@ class MainWindow(QMainWindow):
         buttons=QHBoxLayout(); save=QPushButton("SAVE & EDIT LATER"); submit=QPushButton("SAVE & SUBMIT"); close=QPushButton("Close")
         for b in [save,submit,close]: buttons.addWidget(b)
         outer.addLayout(buttons)
-        if readonly: save.setEnabled(False); submit.setEnabled(False)
+        if readonly: save.setEnabled(True); submit.setEnabled(False)
         def validate_submission():
             if not title.text().strip(): return "Audit Title is required."
             if not audit_type.currentText(): return "Audit Type is required."
@@ -3277,21 +3284,55 @@ class MainWindow(QMainWindow):
                 if not x["target"].date(): return f"Finding {i}: Target Date is required."
             if not auditor.text().strip() or not reviewer.text().strip() or not approver.text().strip(): return "Auditor, Reviewer and Approver are required."
             return ""
+        def save_submitted_status_closeout():
+            nonlocal existing
+            if not existing:
+                return
+            try:
+                now=datetime.now().isoformat(timespec="seconds")
+                for x in finding_widgets:
+                    closeout_value=x["closeout"].text().strip()
+                    status_value=x["status"].currentText().strip()
+                    if closeout_value:
+                        status_value="Closed"
+                        x["status"].setCurrentText("Closed")
+                    if status_value=="Closed" and not closeout_value:
+                        QMessageBox.warning(d,"Close-out Evidence Required","A finding can only be Closed after Close Out Evidence is entered.")
+                        return
+                    fid=x["data"]["id"] if x.get("data") and "id" in x["data"].keys() else None
+                    if fid:
+                        db.execute("UPDATE audit_findings SET status=?, close_out_evidence=?, updated_at=? WHERE id=? AND audit_id=?",(status_value,closeout_value,now,fid,existing["id"]))
+                        self._audit_log(existing["id"],"Submitted audit finding updated",f"Finding {x['data']['finding_number']}: Status={status_value}; Close Out Evidence updated")
+                db.execute("UPDATE audits SET updated_at=? WHERE id=?",(now,existing["id"]))
+                if refresh: refresh()
+                QMessageBox.information(d,"Saved","Status and close-out evidence were saved.")
+            except Exception as e:
+                logging.exception("Audit submitted update failed"); QMessageBox.critical(d,"Save Error",f"Unable to save status/close-out evidence.\n\n{e}")
+
         def save_audit(final=False):
             nonlocal existing
+            if readonly:
+                save_submitted_status_closeout()
+                return
             if final:
                 msg=validate_submission()
                 if msg: QMessageBox.warning(d,"Validation",msg); return
-                if QMessageBox.question(d,"Confirm Submission","Once this audit is submitted, it will become read-only and cannot be edited.")!=QMessageBox.StandardButton.Yes: return
+                if QMessageBox.question(d,"Confirm Submission","Once this audit is submitted, only finding Status and Close Out Evidence can be changed.")!=QMessageBox.StandardButton.Yes: return
             try:
                 now=datetime.now().isoformat(timespec="seconds")
+                ref_value=reference.text().strip()
+                if not ref_value:
+                    QMessageBox.warning(d,"Required","Audit Reference is required."); return
+                duplicate=db.fetchone("SELECT id FROM audits WHERE number=? AND id<>?",(ref_value, existing["id"] if existing else -1))
+                if duplicate:
+                    QMessageBox.warning(d,"Duplicate Audit Reference","This Audit Reference already exists. Please enter a unique reference."); return
                 vals=(audit_date.date().toString("yyyy-MM-dd"),audit_type.currentText(),title.text().strip(),standard.currentText(),department.text().strip(),location.text().strip(),scope.toPlainText(),criteria.toPlainText(),auditor.text().strip(),auditor_pos.text(),auditor_date.date().toString("yyyy-MM-dd"),reviewer.text().strip(),reviewer_pos.text(),reviewer_date.date().toString("yyyy-MM-dd"),approver.text().strip(),approver_pos.text(),approver_date.date().toString("yyyy-MM-dd"),"Submitted" if final else "Draft",now,now if final else "")
                 if not existing:
                     db.execute("INSERT INTO audits(number,audit_date,audit_type,title,standard,department,location,scope,criteria,auditor,auditor_position,auditor_date,reviewer,reviewer_position,reviewer_date,approver,approver_position,approver_date,status,created_by,created_at,updated_at,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                                (reference.text(),)+vals[:18]+(db.setting("current_user","") or "System User",now,now,vals[-1]))
                     existing=db.fetchone("SELECT * FROM audits WHERE number=?",(reference.text(),)); self._audit_log(existing["id"],"Audit created", "Draft" if not final else "Submitted")
                 else:
-                    db.execute("UPDATE audits SET audit_date=?,audit_type=?,title=?,standard=?,department=?,location=?,scope=?,criteria=?,auditor=?,auditor_position=?,auditor_date=?,reviewer=?,reviewer_position=?,reviewer_date=?,approver=?,approver_position=?,approver_date=?,status=?,updated_at=?,submitted_at=? WHERE id=?", vals+(existing["id"],))
+                    db.execute("UPDATE audits SET number=?,audit_date=?,audit_type=?,title=?,standard=?,department=?,location=?,scope=?,criteria=?,auditor=?,auditor_position=?,auditor_date=?,reviewer=?,reviewer_position=?,reviewer_date=?,approver=?,approver_position=?,approver_date=?,status=?,updated_at=?,submitted_at=? WHERE id=?", (ref_value,)+vals+(existing["id"],))
                     self._audit_log(existing["id"],"Audit submitted" if final else "Audit saved", "Status: Submitted" if final else "Status: Draft")
                     db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
                 # If newly created, there are no finding rows yet; always write current finding state.
@@ -3310,8 +3351,8 @@ class MainWindow(QMainWindow):
                     db.execute("DELETE FROM audit_findings WHERE audit_id=?",(existing["id"],))
                 for n,x in enumerate(finding_widgets,1):
                     pid=None
-                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),now,now))
+                    db.execute("INSERT INTO audit_findings(audit_id,finding_number,finding_standard,clause,sub_clause,finding_type,finding_detail,observation,corrective_action,responsible,responsible_person_id,location,target_date,status,close_out_evidence,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                               (existing["id"],n,x["standard"].currentText(),x["clause"].currentText(),x["sub"].currentText(),x["type"].currentText(),x["detail"].toPlainText(),x["detail"].toPlainText(),x["ca"].toPlainText(),x["person"].text().strip(),pid,x["location"].text().strip(),x["target"].date().toString("yyyy-MM-dd"),x["status"].currentText(),x["closeout"].text().strip(),now,now))
                     fid=db.fetchone("SELECT id FROM audit_findings WHERE audit_id=? ORDER BY id DESC LIMIT 1",(existing["id"],))["id"]
                     paths=[x["attachments"].item(i).text() for i in range(x["attachments"].count()) if Path(x["attachments"].item(i).text()).exists()]
                     for fp in paths:
@@ -3405,107 +3446,76 @@ class MainWindow(QMainWindow):
             sec=doc.sections[0]
             sec.orientation=WD_ORIENT.LANDSCAPE
             sec.page_width,sec.page_height=sec.page_height,sec.page_width
-            sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35); sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35)
-
-            # Professional header, matching the existing investigation/observation report approach.
-            header=doc.add_table(rows=1, cols=3)
-            header.alignment=WD_TABLE_ALIGNMENT.CENTER
-            header.autofit=False
-            hc=header.rows[0].cells
-            widths=[Inches(1.35),Inches(7.10),Inches(2.45)]
-            for c,w in zip(hc,widths):
-                c.width=w
-                c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            logo=report_logo_path()
-            if logo and Path(logo).exists():
-                hp=hc[0].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                hp.add_run().add_picture(str(logo),width=Inches(1.05))
-            hp=hc[1].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            r=hp.add_run("AUDIT REPORT\n"); r.bold=True; r.font.size=Pt(16)
-            r=hp.add_run(safe(company_name())); r.bold=True; r.font.size=Pt(11)
-            hp=hc[2].paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.LEFT
-            r=hp.add_run(f"Audit No.: {safe(a['number'])}\n"); r.bold=True
-            hp.add_run(f"Date: {safe(a['audit_date'])}\n")
-            hp.add_run(f"Document No.: {document_prefix()}-AUDIT")
-            style_docx_table(header,header=False,font_size=8)
-
+            sec.top_margin=Inches(0.35); sec.bottom_margin=Inches(0.35); sec.left_margin=Inches(0.35); sec.right_margin=Inches(0.35)
+            # Professional header matching the existing report style.
+            hp=sec.header.paragraphs[0]; hp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+            if report_logo_path() and Path(report_logo_path()).exists():
+                try: hp.add_run().add_picture(report_logo_path(),width=Inches(1.05),height=Inches(0.58))
+                except Exception: logging.exception("Unable to embed audit Word logo")
             p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            r=p.add_run("AUDIT DETAILS"); r.bold=True; r.font.size=Pt(13)
-            info=doc.add_table(rows=0,cols=4); info.alignment=WD_TABLE_ALIGNMENT.CENTER; info.autofit=False
-            detail_rows=[
-                ("Audit Reference",a["number"],"Audit Type",a["audit_type"]),
-                ("Audit Title",a["title"],"Audit Date",a["audit_date"]),
-                ("Department",a["department"],"Location",a["location"]),
-                ("Standard",a["standard"],"Status",a["status"]),
-                ("Scope",a["scope"],"Audit Criteria",a["criteria"]),
-            ]
-            for vals in detail_rows:
-                cells=info.add_row().cells
-                for i,v in enumerate(vals): cells[i].text=safe(v)
+            r=p.add_run(f"{company_name()}\nAUDIT REPORT"); r.bold=True; r.font.size=Pt(14)
+            hdr=doc.add_table(rows=2,cols=6); hdr.alignment=WD_TABLE_ALIGNMENT.CENTER; hdr.autofit=False
+            hvals=["Audit Reference",safe(a["number"]),"Audit Date",safe(a["audit_date"]),"Document No.",f"{document_prefix()}-AUDIT"]
+            hvals2=["Audit Type",safe(a["audit_type"]),"Department",safe(a["department"]),"Location",safe(a["location"])]
+            for i,v in enumerate(hvals): hdr.cell(0,i).text=v
+            for i,v in enumerate(hvals2): hdr.cell(1,i).text=v
+            for row in hdr.rows:
+                for c in row.cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            style_docx_table(hdr,header=True,font_size=8)
+            for row in hdr.rows:
+                for i,c in enumerate(row.cells): c.width=Inches(1.18 if i%2==0 else 2.05)
+            doc.add_paragraph()
+            info=doc.add_table(rows=2,cols=4); info.alignment=WD_TABLE_ALIGNMENT.CENTER; info.autofit=False
+            vals=[("Audit Title",a["title"],"Standard",a["standard"]),("Scope",a["scope"],"Audit Criteria",a["criteria"])]
+            for ri,rowvals in enumerate(vals):
+                for ci,v in enumerate(rowvals): info.cell(ri,ci).text=safe(v)
             for row in info.rows:
-                for i,c in enumerate(row.cells):
-                    c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-                    c.width=Inches(1.45 if i%2==0 else 4.10)
+                for c in row.cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
             style_docx_table(info,header=False,font_size=8)
+            for row in info.rows:
+                row.cells[0].width=Inches(1.15); row.cells[1].width=Inches(4.55); row.cells[2].width=Inches(1.15); row.cells[3].width=Inches(4.55)
 
-            # Findings are presented as real tables. Each finding gets a minimum 2-inch row
-            # for the evidence/detail area; rows are AT_LEAST so long text can expand naturally.
-            doc.add_paragraph()
             p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-            r=p.add_run("AUDIT FINDINGS"); r.bold=True; r.font.size=Pt(13)
+            r=p.add_run("AUDIT FINDINGS"); r.bold=True; r.font.size=Pt(12)
+            # One finding = one landscape row. Evidence is embedded in the same row/cell.
+            cols=["Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence","Target Date","Close Out Evidence"]
+            ft=doc.add_table(rows=1,cols=len(cols)); ft.alignment=WD_TABLE_ALIGNMENT.CENTER; ft.autofit=False
+            for i,h in enumerate(cols): ft.cell(0,i).text=h
+            style_docx_table(ft,header=True,font_size=7)
+            widths=[0.70,0.61,0.98,0.80,0.80,1.54,1.54,0.98,1.08,0.80,1.16]
+            for row in ft.rows:
+                for i,c in enumerate(row.cells): c.width=Inches(widths[i]); c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
             for f in fs:
-                p=doc.add_paragraph(); r=p.add_run(f"Finding {safe(f['finding_number'])} — {safe(f['finding_type'])}"); r.bold=True; r.font.size=Pt(10)
-                ft=doc.add_table(rows=0,cols=4); ft.alignment=WD_TABLE_ALIGNMENT.CENTER; ft.autofit=False
-                rows=[
-                    ("Standard",f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],"Clause",f["clause"]),
-                    ("Sub-Clause",f["sub_clause"],"Finding Type",f["finding_type"]),
-                    ("Responsible Person",f["responsible"],"Location",f["location"] if "location" in f.keys() else ""),
-                    ("Status","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],"Target Date",f["target_date"]),
-                    ("Finding Detail",f["finding_detail"] or f["observation"],"Corrective Action",f["corrective_action"]),
-                ]
-                for vals in rows:
-                    cells=ft.add_row().cells
-                    for i,v in enumerate(vals): cells[i].text=safe(v)
-                    for c in cells:
-                        c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.TOP
-                    # The main finding-content row starts at 2 inches and expands with text.
-                    if vals[0]=="Finding Detail":
-                        trPr=cells[0]._tc.getparent().get_or_add_trPr()
-                        trHeight=OxmlElement("w:trHeight"); trHeight.set(qn("w:val"),str(2880)); trHeight.set(qn("w:hRule"),"atLeast"); trPr.append(trHeight)
-                for row in ft.rows:
-                    row.cells[0].width=Inches(1.35); row.cells[1].width=Inches(4.25); row.cells[2].width=Inches(1.35); row.cells[3].width=Inches(4.25)
-                style_docx_table(ft,header=False,font_size=8)
-                ars=self._audit_attachment_rows(audit_id,f["id"])
-                photos=[]
-                for ar in ars:
+                cells=ft.add_row().cells
+                values=[safe(f["finding_standard"] if "finding_standard" in f.keys() else a["standard"]),safe(f["clause"]),safe(f["sub_clause"]),safe(f["finding_type"]),safe(f["location"] if "location" in f.keys() else ""),safe(f["finding_detail"] or f["observation"]),safe(f["corrective_action"]),safe(f["responsible"]),"",safe(f["target_date"]),safe(f["close_out_evidence"] if "close_out_evidence" in f.keys() else "")]
+                for i,v in enumerate(values): cells[i].text=v
+                # Evidence photo(s) stay inside the Evidence cell on this same finding row.
+                evidence_cell=cells[8]
+                for ar in self._audit_attachment_rows(audit_id,f["id"]):
                     fp=Path(safe(ar["file_path"]))
-                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
-                if photos:
-                    p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                    r=p.add_run("Evidence Photo(s)"); r.bold=True
-                    for fp in photos:
-                        p=doc.add_paragraph(); p.alignment=WD_ALIGN_PARAGRAPH.CENTER
-                        p.add_run().add_picture(str(fp),width=Inches(2.0),height=Inches(2.0))
+                    if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
+                        try:
+                            pp=evidence_cell.paragraphs[0] if evidence_cell.paragraphs and not evidence_cell.paragraphs[0].text else evidence_cell.add_paragraph()
+                            pp.alignment=WD_ALIGN_PARAGRAPH.CENTER
+                            pp.add_run().add_picture(str(fp),width=Inches(0.85),height=Inches(0.75))
+                        except Exception: logging.exception("Unable to embed audit finding evidence photo")
+                for c in cells: c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+                trPr=cells[0]._tc.getparent().get_or_add_trPr()
+                trHeight=OxmlElement("w:trHeight"); trHeight.set(qn("w:val"),str(2880)); trHeight.set(qn("w:hRule"),"atLeast"); trPr.append(trHeight)
+                for i,c in enumerate(cells): c.width=Inches(widths[i])
+            style_docx_table(ft,header=True,font_size=7)
 
-            # Review / approval is a boxed three-row sign-off table, matching the investigation report style.
             doc.add_paragraph()
-            p=doc.add_paragraph(); r=p.add_run("REVIEW & APPROVAL / SIGN-OFF"); r.bold=True; r.font.size=Pt(12)
-            st=doc.add_table(rows=1,cols=4); st.style="Table Grid"; st.alignment=WD_TABLE_ALIGNMENT.CENTER; st.autofit=False
-            for i,h in enumerate(["Role","Name","Position","Date / Signature"]): st.cell(0,i).text=h
-            sign_rows=[
-                ("Auditor",a["auditor"],a["auditor_position"],a["auditor_date"]),
-                ("Reviewed By",a["reviewer"],a["reviewer_position"],a["reviewer_date"]),
-                ("Approved By",a["approver"],a["approver_position"],a["approver_date"]),
-            ]
-            for role,name,pos,dt in sign_rows:
-                cells=st.add_row().cells
-                cells[0].text=role; cells[1].text=f"Name: {safe(name)}"; cells[2].text=f"Position: {safe(pos)}"; cells[3].text=f"Date: {safe(dt)}\nSignature: ______________________________"
+            p=doc.add_paragraph(); r=p.add_run("REVIEW / APPROVAL"); r.bold=True; r.font.size=11
+            st=doc.add_table(rows=3,cols=4); st.alignment=WD_TABLE_ALIGNMENT.CENTER; st.autofit=False
+            sign_rows=[("AUDITOR",a["auditor"],a["auditor_position"],a["auditor_date"]),("REVIEWED BY",a["reviewer"],a["reviewer_position"],a["reviewer_date"]),("APPROVED BY",a["approver"],a["approver_position"],a["approver_date"])]
+            for ri,(role,name,pos,dt) in enumerate(sign_rows):
+                vals=[role,f"Name: {safe(name)}",f"Position: {safe(pos)}",f"Date: {safe(dt)}\nSignature: __________________"]
+                for ci,v in enumerate(vals): st.cell(ri,ci).text=v
             for row in st.rows:
-                for i,c in enumerate(row.cells):
-                    c.width=[Inches(1.45),Inches(3.25),Inches(3.0),Inches(3.5)][i]
-                    c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
-            style_docx_table(st,header=True,font_size=8)
-            doc.add_paragraph(safe(db.setting("report_footer","")))
+                for i,c in enumerate(row.cells): c.width=Inches([1.35,3.3,3.0,3.5][i]); c.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            style_docx_table(st,header=False,font_size=8)
+            footer=doc.add_paragraph(safe(db.setting("report_footer",""))); footer.alignment=WD_ALIGN_PARAGRAPH.CENTER
             doc.save(path); self.show_export_success(path)
         except Exception as e:
             logging.exception("Audit Word export failed"); QMessageBox.critical(self,"Export Error",str(e))
@@ -3516,83 +3526,69 @@ class MainWindow(QMainWindow):
         path=self._export_path(f"{a['number']}_Audit_Report.xlsx","Save Audit Excel Report","Excel Files (*.xlsx)")
         if not path:return
         try:
-            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A5"
+            wb=Workbook(); ws=wb.active; ws.title="Audit Summary"; ws.page_setup.orientation="landscape"; ws.freeze_panes="A5"; ws.sheet_view.showGridLines=False
             ws.merge_cells("A1:C3"); ws.merge_cells("D1:H3"); ws.merge_cells("I1:K1"); ws.merge_cells("I2:K2"); ws.merge_cells("I3:K3")
-            ws["D1"] = f"AUDIT REPORT\n{company_name()}"; ws["I1"] = f"Audit No.: {a['number']}"; ws["I2"] = f"Document No.: {document_prefix()}-AUDIT"; ws["I3"] = f"Date: {a['audit_date']}"
+            ws["D1"]=f"AUDIT REPORT\n{company_name()}"; ws["I1"]=f"Audit No.: {a['number']}"; ws["I2"]=f"Document No.: {document_prefix()}-AUDIT"; ws["I3"]=f"Date: {a['audit_date']}"
             logo_path=report_logo_path()
             if logo_path and Path(logo_path).exists():
                 try:
                     logo=XLImage(logo_path); logo.width=125; logo.height=62; logo.anchor="A1"; ws.add_image(logo)
                 except Exception: logging.exception("Unable to embed audit Excel logo")
             for ref in ["A1","D1","I1","I2","I3"]:
-                ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
+                if not isinstance(ws[ref],MergedCell): ws[ref].alignment=Alignment(horizontal="center",vertical="center",wrap_text=True); ws[ref].font=ws[ref].font.copy(bold=True,size=12)
             ws.append([]); ws.append(["AUDIT SUMMARY"])
             for k,v in [("Audit Reference",a["number"]),("Audit Type",a["audit_type"]),("Audit Title",a["title"]),("Audit Date",a["audit_date"]),("Department",a["department"]),("Location",a["location"]),("Standard",a["standard"]),("Scope",a["scope"]),("Audit Criteria",a["criteria"]),("Auditor",a["auditor"]),("Reviewer",a["reviewer"]),("Approver",a["approver"]),("Total Findings",len(fs))]: ws.append([k,safe(v)])
             ws.column_dimensions["A"].width=25; ws.column_dimensions["B"].width=70
-            thin=Side(style="thin",color="808080")
-            for row in ws.iter_rows():
-                for c in row:
-                    if isinstance(c,MergedCell): continue
-                    c.alignment=Alignment(vertical="top",wrap_text=True); c.border=Border(bottom=thin)
 
-            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"
-            fws.append(["Finding Number","Standard","Finding Type","Clause","Sub-Clause","Finding Detail","Corrective Action","Responsible Person","Location","Status","Target Date","Evidence Photo"])
+            # Findings: one finding per row, with embedded evidence in the Evidence Photo cell.
+            fws=wb.create_sheet("Findings"); fws.page_setup.orientation="landscape"; fws.freeze_panes="A2"; fws.sheet_view.showGridLines=False
+            headers=["Finding Number","Standard","Clause","Sub-Clause","Finding Type","Location","Finding Details","Corrective Action","Responsible Person","Evidence Photo","Target Date","Close Out Evidence"]
+            fws.append(headers)
             for f in fs:
-                fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["finding_type"],f["clause"],f["sub_clause"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["location"] if "location" in f.keys() else "","OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["target_date"],""])
-                rr=fws.max_row; fws.row_dimensions[rr].height=110
+                fws.append([f["finding_number"],f["finding_standard"] if "finding_standard" in f.keys() else a["standard"],f["clause"],f["sub_clause"],f["finding_type"],f["location"] if "location" in f.keys() else "",f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],"",f["target_date"],f["close_out_evidence"] if "close_out_evidence" in f.keys() else ""])
+                rr=fws.max_row; fws.row_dimensions[rr].height=115
                 photos=[]
                 for ar in self._audit_attachment_rows(audit_id,f["id"]):
                     fp=Path(safe(ar["file_path"]))
                     if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}: photos.append(fp)
                 if photos:
                     try:
-                        img=XLImage(str(photos[0])); img.width=110; img.height=90; img.anchor=f"L{rr}"; fws.add_image(img); fws.cell(rr,12).value="Photo evidence"
+                        img=XLImage(str(photos[0])); img.width=135; img.height=95; img.anchor=f"J{rr}"; fws.add_image(img); fws.cell(rr,10).value=""
                     except Exception: logging.exception("Unable to embed audit finding photo")
-            for col,w in {"A":14,"B":16,"C":18,"D":13,"E":18,"F":42,"G":42,"H":24,"I":24,"J":18,"K":15,"L":20}.items(): fws.column_dimensions[col].width=w
+            widths={"A":14,"B":16,"C":12,"D":20,"E":18,"F":20,"G":38.44,"H":38.44,"I":24,"J":30,"K":16,"L":28}
+            for col,w in widths.items(): fws.column_dimensions[col].width=w
 
-            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.append(["Finding Number","Evidence Photo","File Type","Uploaded By","Upload Date"])
+            aws=wb.create_sheet("Attachments"); aws.page_setup.orientation="landscape"; aws.sheet_view.showGridLines=False; aws.append(["Finding Number","Evidence Photo","File Type","Uploaded By","Upload Date"])
             attachment_rows=[("Audit Level",ar) for ar in self._audit_attachment_rows(audit_id)]
             for f in fs: attachment_rows += [(f["finding_number"],ar) for ar in self._audit_attachment_rows(audit_id,f["id"])]
             for label,ar in attachment_rows:
                 fp=Path(safe(ar["file_path"])); aws.append([label,"","Photo" if fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"} else "File",safe(ar["uploaded_by"]),safe(ar["uploaded_at"])])
-                rr=aws.max_row; aws.row_dimensions[rr].height=110
+                rr=aws.max_row; aws.row_dimensions[rr].height=120
                 if fp.exists() and fp.suffix.lower() in {".png",".jpg",".jpeg",".bmp",".gif"}:
                     try:
-                        img=XLImage(str(fp)); img.width=130; img.height=90; img.anchor=f"B{rr}"; aws.add_image(img)
+                        img=XLImage(str(fp)); img.width=175; img.height=100; img.anchor=f"B{rr}"; aws.add_image(img)
                     except Exception: logging.exception("Unable to embed audit attachment photo")
-            for col,w in {"A":18,"B":24,"C":14,"D":24,"E":20}.items(): aws.column_dimensions[col].width=w
+            for col,w in {"A":18,"B":32,"C":14,"D":24,"E":20}.items(): aws.column_dimensions[col].width=w
 
-            cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.append(["Finding Number","Corrective Action","Responsible Person","Target Date","Status","Days Remaining"])
+            cws=wb.create_sheet("Corrective Action Tracker"); cws.page_setup.orientation="landscape"; cws.sheet_view.showGridLines=False
+            cws.append(["Finding Number","Finding Detail","Corrective Action","Responsible Person","Target Date","Status","Close Out Evidence"])
             for f in fs:
                 try: days=(date.fromisoformat(safe(f["target_date"]))-date.today()).days if f["target_date"] else ""
                 except Exception: days=""
-                cws.append([f["finding_number"],f["corrective_action"],f["responsible"],f["target_date"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],days])
+                cws.append([f["finding_number"],f["finding_detail"] or f["observation"],f["corrective_action"],f["responsible"],f["target_date"],"OVERDUE" if overdue(f["target_date"],f["status"]) else f["status"],f["close_out_evidence"] if "close_out_evidence" in f.keys() else ""])
+            for col,w in {"A":14,"B":38.44,"C":38.44,"D":24,"E":16,"F":20,"G":30}.items(): cws.column_dimensions[col].width=w
+            for rr in range(2,cws.max_row+1): cws.row_dimensions[rr].height=65
 
-            # Format every sheet without touching MergedCell objects. This fixes the
-            # "MergedCell object has no attribute column_letter" export failure.
+            thin=Side(style="thin",color="808080")
             for sh in wb.worksheets:
-                sh.freeze_panes=sh.freeze_panes or "A2"
-                sh.auto_filter.ref=sh.dimensions
+                sh.freeze_panes=sh.freeze_panes or "A2"; sh.auto_filter.ref=sh.dimensions
                 for cell in sh[1]:
                     if isinstance(cell,MergedCell): continue
-                    cell.font=cell.font.copy(bold=True,color="FFFFFF")
-                    cell.fill=PatternFill("solid",fgColor="17365D")
-                    cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+                    cell.font=cell.font.copy(bold=True,color="FFFFFF"); cell.fill=PatternFill("solid",fgColor="17365D"); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
                 for row in sh.iter_rows():
                     for c in row:
                         if isinstance(c,MergedCell): continue
-                        c.alignment=Alignment(vertical="top",wrap_text=True)
-                        c.border=Border(bottom=thin)
-                # Only real cells are used for width calculation; merged placeholders are ignored.
-                for col_cells in sh.iter_cols():
-                    real=[c for c in col_cells if not isinstance(c,MergedCell)]
-                    if not real: continue
-                    letter=real[0].column_letter
-                    max_len=0
-                    for c in real:
-                        val=safe(c.value)
-                        max_len=max(max_len,max((len(x) for x in val.split("\n")),default=0))
-                    sh.column_dimensions[letter].width=min(max(max_len+2,12),55)
+                        c.alignment=Alignment(vertical="center",horizontal="left",wrap_text=True); c.border=Border(bottom=thin)
             wb.save(path); self.show_export_success(path)
         except Exception as e:
             logging.exception("Audit Excel export failed"); QMessageBox.critical(self,"Export Error",str(e))
